@@ -126,6 +126,11 @@ def rules_sidebar() -> Rules:
 
 # --- Разделы страницы -------------------------------------------------------------
 
+def graph_theme() -> str:
+    """Тема для графа: светлая или тёмная, как у самой страницы."""
+    return "dark" if st.context.theme.get("type") == "dark" else "light"
+
+
 def show_summary(tx: pd.DataFrame, suspicious: pd.DataFrame, result):
     n_cards = len((set(tx["sender_card"]) | set(tx["receiver_card"])) - {ATM, EXTERNAL})
     columns = st.columns(6 if result else 3)
@@ -198,7 +203,8 @@ def show_card(tx: pd.DataFrame, events: pd.DataFrame, suspicious: pd.DataFrame, 
     graph_column, ops_column = st.columns([3, 2])
     with graph_column:
         st.caption("Движение денег вокруг карты: прямые связи и дальше по цепочке через подозрительные карты")
-        st.iframe(to_html(build_graph(tx, [card], risk, drops, depth=3), height=480), height=500)
+        graph = build_graph(tx, [card], risk, drops, depth=3)
+        st.iframe(to_html(graph, height=480, theme=graph_theme()), height=500)
         show_legend(bool(drops))
     with ops_column:
         st.caption("Операции карты")
@@ -227,7 +233,7 @@ def show_network(tx: pd.DataFrame, suspicious: pd.DataFrame, drops: set):
     risk = dict(zip(suspicious["card"], suspicious["risk"], strict=True))
     graph = build_graph(tx, suspicious["card"].head(top), risk, drops, depth=1, max_edges=400)
     st.caption("Подозрительные карты и их прямые связи. Узлы можно двигать, при наведении видны подробности.")
-    st.iframe(to_html(graph, height=620), height=640)
+    st.iframe(to_html(graph, height=620, theme=graph_theme()), height=640)
     show_legend(bool(drops))
 
 

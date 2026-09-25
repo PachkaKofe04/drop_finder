@@ -1,5 +1,6 @@
 # drop_finder
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://drop-finder.streamlit.app)
 [![Tests](https://github.com/PachkaKofe04/drop_finder/actions/workflows/tests.yml/badge.svg)](https://github.com/PachkaKofe04/drop_finder/actions/workflows/tests.yml)
 ![Python 3.11](https://img.shields.io/badge/python-3.11-blue)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
@@ -12,6 +13,8 @@ drop_finder looks for the patterns such cards leave in transaction data.
 What is inside: a synthetic data generator with hidden mule schemes, a loader for real bank exports,
 explainable rule-based detection with accuracy metrics, and a Streamlit dashboard with an interactive
 money flow graph.
+
+**Live demo:** [drop-finder.streamlit.app](https://drop-finder.streamlit.app) (synthetic data only).
 
 ## Quick start
 

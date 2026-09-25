@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from flow_graph import COLOR_MISSED, COLOR_REGULAR, COLOR_SUSPICIOUS, REFIT_SCRIPT, build_graph, to_html
+from flow_graph import COLOR_MISSED, COLOR_REGULAR, COLOR_SUSPICIOUS, REFIT_SCRIPT, THEMES, build_graph, to_html
 from loader import ATM, COLUMNS, EXTERNAL
 
 T0 = pd.Timestamp("2026-08-10 10:00")
@@ -82,3 +82,21 @@ def test_html_is_interactive_and_safe():
     assert "vis.Network" in page
     assert REFIT_SCRIPT.strip() in page
     assert "<script>alert(1)" not in page
+
+
+def test_dark_theme():
+    graph = build_graph(CHAIN, ["drop1"], RISK)
+    light, dark = to_html(graph), to_html(graph, theme="dark")
+    assert f"background: {THEMES['dark']['background']}" in dark
+    assert f'"color": "{THEMES["dark"]["font"]}"' in dark      # подписи узлов светлые
+    assert f"background: {THEMES['light']['background']}" in light
+    assert ".card { background: transparent" in dark
+
+
+def test_layout_is_computed_in_advance():
+    """Координаты задаются заранее, физика в браузере выключена, картинка не меняется от раза к разу."""
+    graph = build_graph(CHAIN, ["drop1"], RISK, depth=3)
+    page = to_html(graph)
+    assert '"physics": {"enabled": false}' in page
+    assert page.count('"x": ') == graph.number_of_nodes()
+    assert page == to_html(graph)

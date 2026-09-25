@@ -22,31 +22,27 @@ COLOR_REGULAR = "#7fa7d4"      # обычная карта
 COLOR_ATM = "#2e9e5b"
 COLOR_EXTERNAL = "#a0a0a0"
 
-# Настройки vis-network: сначала раскладываем граф и вписываем его в окно,
-# толщина связи зависит от суммы, но в разумных пределах
+# Фон, подписи и рамка под светлую и тёмную тему Streamlit
+THEMES = {
+    "light": {"background": "#ffffff", "font": "#31333f", "border": "#e6e9ef"},
+    "dark": {"background": "#0e1117", "font": "#fafafa", "border": "#31333f"},
+}
+
+# Настройки vis-network. Физика выключена: координаты узлов считаются заранее
+# (см. _layout), поэтому картинка не «плывёт» и сразу вписывается в окно.
+# Толщина связи зависит от суммы, но в разумных пределах.
 VIS_OPTIONS = {
-    "physics": {
-        "solver": "barnesHut",
-        "barnesHut": {"gravitationalConstant": -4000, "springLength": 140, "springConstant": 0.04,
-                      "damping": 0.3, "avoidOverlap": 0.2},
-        "stabilization": {"enabled": True, "iterations": 400, "fit": True},
-    },
+    "physics": {"enabled": False},
     "edges": {"smooth": {"type": "continuous"}, "scaling": {"min": 1, "max": 6},
               "arrows": {"to": {"enabled": True, "scaleFactor": 0.6}}},
     "nodes": {"font": {"size": 13}},
     "interaction": {"hover": True, "tooltipDelay": 100},
 }
 
-# После раскладки физику выключаем, иначе несвязанные группы узлов продолжают
-# разъезжаться за край окна. Кроме того, граф может создаваться во вкладке, которая
-# ещё скрыта, и тогда vis-network вписывает его в окно нулевого размера: поэтому
-# вписываем заново, когда окно получает настоящий размер.
+# Граф может создаваться во вкладке, которая ещё скрыта: тогда vis-network вписывает
+# его в окно нулевого размера. Вписываем заново, когда окно получает настоящий размер.
 REFIT_SCRIPT = """
 <script>
-  network.once("stabilizationIterationsDone", () => {
-    network.setOptions({physics: false});
-    network.fit();
-  });
   new ResizeObserver(() => { network.redraw(); network.fit(); })
     .observe(document.getElementById("mynetwork"));
 </script>
@@ -126,22 +122,61 @@ def _node_style(node: str, centers: set, suspicious: dict, drops) -> dict:
     return {"label": node, "title": "\n".join(lines), "color": color, "shape": "dot", "size": size}
 
 
+def _layout(graph: nx.DiGraph) -> dict:
+    """Координаты узлов в пикселях.
+
+    Считаем здесь, а не физикой в браузере: там раскладка асинхронная и иногда
+    заканчивается уже после того, как граф вписали в окно. С фиксированным seed
+    картинка ещё и одинаковая при каждом открытии.
+
+    Каждую связную группу карт раскладываем отдельно и ставим группы рядами,
+    как слова в строке: общая раскладка разбросала бы группы по краям окна.
+    """
+    undirected = graph.to_undirected()
+    groups = sorted(nx.connected_components(undirected), key=lambda g: (-len(g), min(g)))
+    radius = {id(g): 80 * len(g) ** 0.5 for g in groups}
+    gap = 60
+    row_limit = 1.8 * sum((2 * r) ** 2 for r in radius.values()) ** 0.5   # окно примерно 16:9
+
+    positions, x, y, row_height = {}, 0.0, 0.0, 0.0
+    for group in groups:
+        r = radius[id(group)]
+        if x > 0 and x + 2 * r > row_limit:
+            x, y, row_height = 0.0, y + row_height + gap, 0.0
+        local = (nx.spring_layout(undirected.subgraph(group), k=3 / len(group) ** 0.5, seed=42, iterations=200, scale=r)
+                 if len(group) > 1 else {next(iter(group)): (0.0, 0.0)})
+        for node, (node_x, node_y) in local.items():
+            positions[node] = (x + r + node_x, y + r + node_y)
+        x += 2 * r + gap
+        row_height = max(row_height, 2 * r)
+    return positions
+
+
 def _money(value: float) -> str:
     return f"{value:,.0f}".replace(",", " ") + " ₽"
 
 
-def to_html(graph: nx.DiGraph, height: int = 600) -> str:
+def to_html(graph: nx.DiGraph, height: int = 600, theme: str = "light") -> str:
     """Интерактивная картинка графа (HTML со встроенным vis-network).
 
     Номера карт могут прийти из загруженного файла, но экранировать их не нужно:
     pyvis передаёт узлы и связи через фильтр tojson, он кодирует <, > и &,
     а vis-network показывает подсказки как текст, а не как HTML.
     """
-    net = Network(height=f"{height}px", width="100%", directed=True, cdn_resources="remote")
+    colors = THEMES.get(theme, THEMES["light"])
+    net = Network(height=f"{height}px", width="100%", directed=True, cdn_resources="remote",
+                  bgcolor=colors["background"], font_color=colors["font"])
     net.set_options(json.dumps(VIS_OPTIONS))
+    positions = _layout(graph)
     for node, data in graph.nodes(data=True):
-        net.add_node(node, label=data["label"], title=data["title"],
-                     color=data["color"], shape=data["shape"], size=data["size"])
+        x, y = positions[node]
+        net.add_node(node, label=data["label"], title=data["title"], color=data["color"],
+                     shape=data["shape"], size=data["size"], x=float(x), y=float(y))
     for source, target, data in graph.edges(data=True):
         net.add_edge(source, target, title=data["title"], value=data["amount"])
-    return net.generate_html().replace("</body>", REFIT_SCRIPT + "</body>")
+    # Шаблон pyvis оборачивает граф в белую карточку с серой рамкой - перекрашиваем под тему
+    style = (f"<style>body {{ margin: 0; background: {colors['background']}; }} "
+             f".card {{ background: transparent; border: none; }} "
+             f"#mynetwork {{ border: 1px solid {colors['border']} !important; }}</style>")
+    page = net.generate_html()
+    return page.replace("</head>", style + "</head>").replace("</body>", REFIT_SCRIPT + "</body>")
