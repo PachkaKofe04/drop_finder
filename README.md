@@ -9,8 +9,9 @@ Prototype anti-fraud tool for detecting money mule ("drop") cards from card tran
 A money mule card is used to receive stolen money and pass it on: to other cards or out through an ATM.
 drop_finder looks for the patterns such cards leave in transaction data.
 
-**Current stage:** a synthetic data generator with hidden mule schemes, a loader for real bank
-exports, and rule-based detection with accuracy metrics. The web interface comes next.
+What is inside: a synthetic data generator with hidden mule schemes, a loader for real bank exports,
+explainable rule-based detection with accuracy metrics, and a Streamlit dashboard with an interactive
+money flow graph.
 
 ## Quick start
 
@@ -35,7 +36,8 @@ On Linux / macOS activate the environment with `source .venv/bin/activate`.
 | `loader.py` | Loads and validates any CSV (synthetic or real) into the common format |
 | `detectors.py` | Three detection rules, one row per suspicious card with a reason |
 | `metrics.py` | Precision / recall against the ground truth, benchmark over many seeds |
-| `app.py` | Streamlit web interface (placeholder for now) |
+| `flow_graph.py` | Money flow graph: networkx for the structure, pyvis for the picture |
+| `app.py` | Streamlit dashboard |
 | `tests/` | pytest suite |
 | `data/` | CSV files, not tracked by git |
 
@@ -167,6 +169,24 @@ Real data is noisier, and the thresholds will need tuning on it.
 Performance: about 6 seconds for 1 million operations. Operations are indexed by (card, time) keys
 and searched with binary search instead of row-by-row loops.
 
+## Dashboard
+
+```
+streamlit run app.py
+```
+
+- data source: synthetic data (seed, number of clients) or your own CSV with an optional ground truth file;
+- rule thresholds in the sidebar, the list and the metrics update immediately;
+- suspicious cards with risk, rules and reasons, CSV download;
+- card drill-down: every rule hit, the card's operations and an interactive money flow graph
+  that follows the chain through other suspicious cards;
+- network view of all suspicious cards and their direct links.
+
+**Demo mode.** Uploading files is only available when the app is opened on `localhost`.
+A public deployment, such as Streamlit Community Cloud, works on synthetic data only,
+so that nobody uploads real customer data to a public server. To allow uploads on your own
+server, set `DROP_FINDER_ALLOW_UPLOAD=1`.
+
 ## Tests
 
 ```
@@ -180,4 +200,5 @@ GitHub Actions runs the same on every push: lint, tests and coverage (the build 
 The tests check that every hidden scheme matches its definition, that the legitimate
 look-alikes stay below detection thresholds, that the loader handles messy real exports
 (Windows-1251, `;`, Russian headers, mixed date formats, currency in amounts, full card numbers),
-and that each detection rule fires on its pattern and stays silent on hand-made near misses.
+that each detection rule fires on its pattern and stays silent on hand-made near misses,
+and that the dashboard builds without errors and reacts to its settings (Streamlit AppTest).
