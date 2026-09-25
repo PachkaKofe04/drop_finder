@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual Environment
+.venv/
+venv/
+
+# Environment variables (секретный ключ DROP_FINDER_SECRET и т.п.)
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Артефакты тестов
+.pytest_cache/
+.coverage
+
+# Данные: синтетика генерируется заново, реальные выгрузки в репозиторий не попадают
+data/*
+!data/.gitkeep
