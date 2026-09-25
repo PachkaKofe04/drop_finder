@@ -16,7 +16,7 @@ MASKED_CARD = r"\d{4} \*{4} \*{4} \d{4}"
 def scheme_cards(ground_truth: pd.DataFrame, scheme_id: str) -> dict:
     """Роль -> карта для одного экземпляра схемы."""
     rows = ground_truth[ground_truth["scheme_id"] == scheme_id]
-    return dict(zip(rows["role"], rows["card"]))
+    return dict(zip(rows["role"], rows["card"], strict=True))
 
 
 # --- Воспроизводимость и формат ----------------------------------------------

@@ -205,7 +205,7 @@ def cash_out(card: str, total: float, start: datetime, within_minutes: float) ->
     weights = [random.uniform(0.5, 1.0) for _ in range(parts)]
     moments = sorted(after(start, 0, within_minutes) for _ in range(parts))
     return [tx(when, card, ATM, total * w / sum(weights) // 100 * 100, "cash_withdrawal")
-            for when, w in zip(moments, weights)]
+            for when, w in zip(moments, weights, strict=True)]
 
 
 def transit_scheme(scheme_id: str, victim: str) -> tuple[list, list]:

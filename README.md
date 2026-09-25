@@ -1,5 +1,9 @@
 # drop_finder
 
+[![Tests](https://github.com/PachkaKofe04/drop_finder/actions/workflows/tests.yml/badge.svg)](https://github.com/PachkaKofe04/drop_finder/actions/workflows/tests.yml)
+![Python 3.11](https://img.shields.io/badge/python-3.11-blue)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 Prototype anti-fraud tool for detecting money mule ("drop") cards from card transfer history.
 
 A money mule card is used to receive stolen money and pass it on: to other cards or out through an ATM.
@@ -121,10 +125,11 @@ and follow your organization's rules for personal and payment card data.
 
 ```
 pip install -r requirements-dev.txt
-pytest
+pytest --cov
+ruff check .
 ```
 
-With coverage: `pytest --cov=generator --cov=loader --cov-report=term-missing`
+GitHub Actions runs the same on every push: lint, tests and coverage (the build fails below 90%).
 
 The tests check that every hidden scheme matches its definition, that the legitimate
 look-alikes stay below detection thresholds, and that the loader handles messy real exports:
