@@ -9,9 +9,8 @@ Prototype anti-fraud tool for detecting money mule ("drop") cards from card tran
 A money mule card is used to receive stolen money and pass it on: to other cards or out through an ATM.
 drop_finder looks for the patterns such cards leave in transaction data.
 
-**Current stage:** project structure, a synthetic data generator with hidden mule schemes,
-and a loader that brings both synthetic data and real bank exports to one format.
-Detection and the web interface come next.
+**Current stage:** a synthetic data generator with hidden mule schemes, a loader for real bank
+exports, and rule-based detection with accuracy metrics. The web interface comes next.
 
 ## Quick start
 
@@ -22,6 +21,7 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 python generator.py --seed 42
+python detectors.py data/transactions.csv --truth data/ground_truth.csv
 streamlit run app.py
 ```
 
@@ -33,6 +33,8 @@ On Linux / macOS activate the environment with `source .venv/bin/activate`.
 |---|---|
 | `generator.py` | Synthetic transactions with hidden mule schemes |
 | `loader.py` | Loads and validates any CSV (synthetic or real) into the common format |
+| `detectors.py` | Three detection rules, one row per suspicious card with a reason |
+| `metrics.py` | Precision / recall against the ground truth, benchmark over many seeds |
 | `app.py` | Streamlit web interface (placeholder for now) |
 | `tests/` | pytest suite |
 | `data/` | CSV files, not tracked by git |
@@ -121,6 +123,50 @@ with the same visible digits will then be merged into one.
 The `data/` folder is excluded from git. Do not commit or share real exports,
 and follow your organization's rules for personal and payment card data.
 
+## Detection
+
+```
+python detectors.py data/transactions.csv --truth data/ground_truth.csv
+```
+
+Three explainable rules. Thresholds live in `detectors.Rules` and are deliberately looser
+than the generator's parameters, so the detector is not tuned to its own synthetic data.
+
+| Rule | Fires when |
+|---|---|
+| `transit` | A transfer of 10 000+ arrives and 90-100% of it leaves the card within 6 hours. Cards passing money to each other are linked into chains with networkx |
+| `funnel` | 8+ different senders within 48 hours, 50 000+ collected, and 80%+ of it leaves within the next 24 hours |
+| `fast_cashout` | 30 000+ arrives and 80%+ of it is withdrawn in cash within an hour |
+
+Every flagged card comes with a human-readable reason (in Russian), for example:
+
+> Транзит: пришло 88 000 ₽ от 5536 \*\*\*\* \*\*\*\* 9197, за 1 ч 42 мин ушло 87 399 ₽ (99%) на 4276 \*\*\*\* \*\*\*\* 4734, цепочка из 2 транзитных карт
+
+The risk score orders the list, it is not a probability: transit 70 (90 in a chain of transit cards),
+fast cash-out 75, funnel 85, plus 5 for each additional rule. Without `--truth` the command works
+on real exports and just saves the list to `data/suspicious.csv`.
+
+### Results on synthetic data
+
+`python metrics.py --seeds 20`
+
+| | Precision | Recall | F1 |
+|---|---|---|---|
+| Seed 42 | 93.3% | 100% | 96.6% |
+| Mean over 20 seeds | 94.6% | 100% | 97.1% |
+| Worst seed | 87.5% | 100% | 93.3% |
+
+All 17 false positives over 20 seeds come from the transit rule: a regular client receives
+10-53 thousand rubles and happens to send about the same amount within a few hours. The legitimate look-alikes
+(group collections, cash after payday) produce none. False positives get the lowest risk score (70),
+while real transit chains get 90.
+
+**Caveat:** the rules and the generator were written by the same author, so these numbers are optimistic.
+Real data is noisier, and the thresholds will need tuning on it.
+
+Performance: about 6 seconds for 1 million operations. Operations are indexed by (card, time) keys
+and searched with binary search instead of row-by-row loops.
+
 ## Tests
 
 ```
@@ -132,5 +178,6 @@ ruff check .
 GitHub Actions runs the same on every push: lint, tests and coverage (the build fails below 90%).
 
 The tests check that every hidden scheme matches its definition, that the legitimate
-look-alikes stay below detection thresholds, and that the loader handles messy real exports:
-Windows-1251, `;`, Russian headers, mixed date formats, currency in amounts, full card numbers.
+look-alikes stay below detection thresholds, that the loader handles messy real exports
+(Windows-1251, `;`, Russian headers, mixed date formats, currency in amounts, full card numbers),
+and that each detection rule fires on its pattern and stays silent on hand-made near misses.

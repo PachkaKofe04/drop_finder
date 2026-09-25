@@ -4,7 +4,7 @@ pythonpath = ["."]
 addopts = "-v --tb=short"
 
 [tool.coverage.run]
-source = ["generator", "loader"]
+source = ["generator", "loader", "detectors", "metrics"]
 
 [tool.coverage.report]
 show_missing = true
