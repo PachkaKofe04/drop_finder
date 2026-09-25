@@ -30,6 +30,7 @@ On Linux / macOS activate the environment with `source .venv/bin/activate`.
 | `generator.py` | Synthetic transactions with hidden mule schemes |
 | `loader.py` | Loads and validates any CSV (synthetic or real) into the common format |
 | `app.py` | Streamlit web interface (placeholder for now) |
+| `tests/` | pytest suite |
 | `data/` | CSV files, not tracked by git |
 
 ## Data format
@@ -115,3 +116,16 @@ with the same visible digits will then be merged into one.
 
 The `data/` folder is excluded from git. Do not commit or share real exports,
 and follow your organization's rules for personal and payment card data.
+
+## Tests
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
+With coverage: `pytest --cov=generator --cov=loader --cov-report=term-missing`
+
+The tests check that every hidden scheme matches its definition, that the legitimate
+look-alikes stay below detection thresholds, and that the loader handles messy real exports:
+Windows-1251, `;`, Russian headers, mixed date formats, currency in amounts, full card numbers.
