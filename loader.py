@@ -185,10 +185,15 @@ def _parse_datetime(values: pd.Series, datetime_format: str | None) -> pd.Series
     if datetime_format:
         return pd.to_datetime(values, format=datetime_format, errors="coerce")
 
-    # Сначала строгий ISO (2026-08-01 14:30:00), потом частые «русские» форматы.
-    # Разбор по известному формату быстрый, поэтому пробуем их по очереди.
-    parsed = pd.to_datetime(values, format="ISO8601", errors="coerce")
-    for fmt in RU_DATETIME_FORMATS:
+    # Разбор по известному формату быстрый, но каждый проход по всему столбцу
+    # стоит времени, даже неудачный. Поэтому основной формат выбираем по первым
+    # строкам, а остальные форматы пробуем только на том, что не распозналось.
+    formats = ["ISO8601"] + RU_DATETIME_FORMATS
+    sample = values[values.ne("")].head(1000)
+    best = max(formats, key=lambda fmt: pd.to_datetime(sample, format=fmt, errors="coerce").notna().sum())
+
+    parsed = pd.to_datetime(values, format=best, errors="coerce")
+    for fmt in formats:
         failed = parsed.isna() & values.ne("")
         if not failed.any():
             return parsed
@@ -210,8 +215,19 @@ def _parse_amount(value) -> float:
     text = CURRENCY_PATTERN.sub("", re.sub(r"\s", "", str(value))).replace(",", ".")
     if not NUMBER_PATTERN.fullmatch(text):
         return float("nan")
+    return float(text)
+
+
+def _parse_amounts(values: pd.Series) -> pd.Series:
+    """Суммы в числа. Простые («1234,56») разбираются сразу для всего столбца,
+    остальные («1 234,56 руб.») - по одной через _parse_amount.
+    """
+    simple = values.str.fullmatch(r"-?\d+([.,]\d+)?")
+    amounts = pd.Series(float("nan"), index=values.index)
+    amounts[simple] = pd.to_numeric(values[simple].str.replace(",", ".", regex=False))
+    amounts[~simple] = _map_unique(values[~simple], _parse_amount)
     # В выписках списания бывают со знаком минус - берём по модулю
-    return abs(float(text))
+    return amounts.abs()
 
 
 def _normalize_op_type(value) -> str:
@@ -246,7 +262,7 @@ def load_transactions(source, column_map: dict | None = None,
         "datetime": _parse_datetime(raw["datetime"], datetime_format),
         "sender_card": _map_unique(raw["sender_card"], normalize_card),
         "receiver_card": _map_unique(raw["receiver_card"], normalize_card),
-        "amount": _map_unique(raw["amount"], _parse_amount),
+        "amount": _parse_amounts(raw["amount"]),
         "op_type": _map_unique(raw["op_type"], _normalize_op_type),
     })
 
