@@ -6,7 +6,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 APP = Path(__file__).parent.parent / "app.py"
-TABS = ["Подозрительные карты", "Разбор карты", "Граф связей", "Как это работает"]
+TABS = ["Подозрительные карты", "Разбор карты", "Граф связей", "Куда ушли деньги", "Как это работает"]
 
 
 @pytest.fixture
@@ -55,3 +55,14 @@ def test_other_seed(app):
     seed.set_value(7).run()
     assert not app.exception
     assert metrics(app)["Операций"] != "2 998"
+
+
+def test_money_tracing_tab(app):
+    assert metrics(app)["Прослежено"] == "179 000 ₽"
+    assert metrics(app)["Снято наличными"] == "171 400 ₽"
+    assert len(app.get("plotly_chart")) == 1
+
+    steps = next(n for n in app.number_input if n.label == "Шагов не больше")
+    steps.set_value(1).run()
+    assert not app.exception
+    assert metrics(app)["Снято наличными"] == "0 ₽"

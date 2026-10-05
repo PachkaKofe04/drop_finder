@@ -23,9 +23,11 @@ from detectors import FAST_CASHOUT, FUNNEL, RULE_NAMES, TRANSIT, Rules, find_eve
 from flow_graph import COLOR_ATM, COLOR_EXTERNAL, COLOR_MISSED, COLOR_REGULAR, COLOR_SUSPICIOUS, build_graph, to_html
 from loader import ATM, EXTERNAL, load_ground_truth, load_transactions
 from metrics import evaluate
+from tracing import to_sankey, trace
 
 REPO_URL = "https://github.com/PachkaKofe04/drop_finder"
 RULE_TITLES = {TRANSIT: "Транзит", FUNNEL: "Воронка", FAST_CASHOUT: "Быстрое обналичивание"}
+OP_TITLES = {"transfer": "перевод", "cash_withdrawal": "снятие", "top_up": "пополнение", "other": "другое"}
 SYNTHETIC, UPLOAD = "Синтетика", "Свой файл"
 
 
@@ -125,6 +127,16 @@ def rules_sidebar() -> Rules:
 
 
 # --- Разделы страницы -------------------------------------------------------------
+
+def money(value: float) -> str:
+    return f"{value:,.0f}".replace(",", " ") + " ₽"
+
+
+def duration(delta: pd.Timedelta) -> str:
+    minutes = int(delta.total_seconds() // 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
+
 
 def graph_theme() -> str:
     """Тема для графа: светлая или тёмная, как у самой страницы."""
@@ -237,6 +249,53 @@ def show_network(tx: pd.DataFrame, suspicious: pd.DataFrame, drops: set):
     show_legend(bool(drops))
 
 
+def show_tracing(tx: pd.DataFrame, suspicious: pd.DataFrame):
+    if suspicious.empty:
+        st.info("Подозрительных карт нет, прослеживать нечего.")
+        return
+
+    # Начало прослеживания - деньги, пришедшие на подозрительную карту извне цепочки:
+    # перевод жертвы или пополнение. Сначала - на самые рискованные карты.
+    risk = dict(zip(suspicious["card"], suspicious["risk"], strict=True))
+    starts = tx[tx["receiver_card"].isin(risk) & ~tx["sender_card"].isin(risk)
+                & tx["op_type"].isin(["transfer", "top_up"])]
+    if starts.empty:
+        st.info("На подозрительные карты не приходило переводов и пополнений извне.")
+        return
+    starts = (starts.assign(risk=starts["receiver_card"].map(risk))
+                    .sort_values(["risk", "amount"], ascending=False))
+    labels = {idx: f"{op.datetime:%d.%m %H:%M}   "
+                   f"{'Пополнение' if op.sender_card == EXTERNAL else op.sender_card} -> {op.receiver_card},   "
+                   f"{money(op.amount)}" for idx, op in starts.iterrows()}
+    start = st.selectbox("Откуда начать: поступление на подозрительную карту", list(labels), format_func=labels.get)
+
+    with st.expander("Настройки прослеживания"):
+        horizon = st.number_input("Смотреть исходящие операции карты в течение, часов", 1, 720, 72)
+        max_steps = st.number_input("Шагов не больше", 1, 20, 6)
+    result = trace(tx, start, pd.Timedelta(hours=horizon), max_steps)
+
+    columns = st.columns(5)
+    columns[0].metric("Прослежено", money(result.amount))
+    columns[1].metric("Снято наличными", money(result.cashed), f"{result.cashed / result.amount:.0%}",
+                      delta_color="off", delta_arrow="off")
+    columns[2].metric("Осталось на картах", money(result.settled_total))
+    columns[3].metric("Карт в цепочке", result.cards)
+    columns[4].metric("До первого снятия", duration(result.time_to_cash) if result.time_to_cash is not None else "-")
+
+    st.plotly_chart(to_sankey(result, set(risk)))
+    st.caption("Допущение, как в расследованиях: первыми с карты уходят именно прослеживаемые деньги, "
+               "но не больше, чем пришло. Ширина полосы - сумма.")
+    st.dataframe(result.flows.assign(op_type=result.flows["op_type"].map(OP_TITLES).fillna(result.flows["op_type"])),
+                 hide_index=True, column_config={
+                     "step": st.column_config.NumberColumn("Шаг", width="small"),
+                     "time": st.column_config.DatetimeColumn("Когда", format="DD.MM HH:mm", width="small"),
+                     "sender": "Откуда",
+                     "receiver": "Куда",
+                     "amount": st.column_config.NumberColumn("Сумма, ₽", format="%.0f"),
+                     "op_type": "Тип",
+                 })
+
+
 def show_about():
     st.markdown(f"""
 Детектор ищет **дроп-карты**: карты, через которые прогоняют и обналичивают похищенные деньги.
@@ -276,14 +335,16 @@ def main():
     drops = set(truth["card"]) if truth is not None else set()
 
     show_summary(transactions, suspicious, result)
-    tab_list, tab_card, tab_network, tab_about = st.tabs(
-        ["Подозрительные карты", "Разбор карты", "Граф связей", "Как это работает"])
+    tab_list, tab_card, tab_network, tab_tracing, tab_about = st.tabs(
+        ["Подозрительные карты", "Разбор карты", "Граф связей", "Куда ушли деньги", "Как это работает"])
     with tab_list:
         show_table(suspicious, drops, result)
     with tab_card:
         show_card(transactions, events, suspicious, drops)
     with tab_network:
         show_network(transactions, suspicious, drops)
+    with tab_tracing:
+        show_tracing(transactions, suspicious)
     with tab_about:
         show_about()
 

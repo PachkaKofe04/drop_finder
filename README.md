@@ -12,8 +12,8 @@ A money mule card is used to receive stolen money and pass it on: to other cards
 drop_finder looks for the patterns such cards leave in transaction data.
 
 What is inside: a synthetic data generator with hidden mule schemes, a loader for real bank exports,
-explainable rule-based detection with accuracy metrics, and a Streamlit dashboard with an interactive
-money flow graph.
+explainable rule-based detection with accuracy metrics, money tracing from a victim to the ATM,
+and a Streamlit dashboard with an interactive money flow graph.
 
 **Live demo:** [drop-finder.streamlit.app](https://drop-finder.streamlit.app) (synthetic data only).
 
@@ -43,6 +43,7 @@ On Linux / macOS activate the environment with `source .venv/bin/activate`.
 | `detectors.py` | Three detection rules, one row per suspicious card with a reason |
 | `metrics.py` | Precision / recall against the ground truth, benchmark over many seeds |
 | `flow_graph.py` | Money flow graph: networkx for the structure, pyvis for the picture |
+| `tracing.py` | Money tracing: where the money from one operation went, Sankey diagram |
 | `app.py` | Streamlit dashboard |
 | `tests/` | pytest suite |
 | `data/` | CSV files, not tracked by git |
@@ -58,6 +59,7 @@ flowchart LR
     GT["ground truth"] --> M
     D --> A["app.py<br>Streamlit dashboard"]
     F["flow_graph.py<br>networkx + pyvis"] --> A
+    TR["tracing.py<br>money tracing, Sankey"] --> A
 ```
 
 Every component after the loader works with one data format, so the same detection code runs
@@ -202,11 +204,28 @@ streamlit run app.py
 - suspicious cards with risk, rules and reasons, CSV download;
 - card drill-down: every rule hit, the card's operations and an interactive money flow graph
   that follows the chain through other suspicious cards;
-- network view of all suspicious cards and their direct links.
+- network view of all suspicious cards and their direct links;
+- money tracing (see below).
 
 ![Card drill-down: a transit chain from the victim through two mule cards to an ATM](docs/card.png)
 
 ![Network view of all suspicious cards](docs/network.png)
+
+### Money tracing
+
+Pick a transfer into a suspicious card, for example a victim's payment, and see where that money went:
+through which cards, how much was withdrawn in cash and how much is still on cards,
+and how soon the cash-out started.
+
+The tracer follows the receiving card's outgoing operations in time order and assumes that the traced
+money leaves first, but never more than arrived (a common conservative assumption in investigations).
+It stops at an ATM, after a time horizon (72 hours per card by default) or after a number of steps,
+never counts the same operation twice and keeps the total exactly equal to the traced amount.
+
+With seed 42, the share of a victim's money that ends up withdrawn in cash is 95.8-98.5% in transit
+chains, 100% in funnels and 91.3-94.9% in fast cash-outs.
+
+![Money tracing: Sankey diagram from the victim through two mule cards to cash](docs/tracing.png)
 
 **Demo mode.** Uploading files is only available when the app is opened on `localhost`.
 A public deployment, such as Streamlit Community Cloud, works on synthetic data only,
@@ -227,6 +246,7 @@ The tests check that every hidden scheme matches its definition, that the legiti
 look-alikes stay below detection thresholds, that the loader handles messy real exports
 (Windows-1251, `;`, Russian headers, mixed date formats, currency in amounts, full card numbers),
 that each detection rule fires on its pattern and stays silent on hand-made near misses,
+that money tracing never loses or double-counts money (splits, cycles, horizons, step limits),
 and that the dashboard builds without errors and reacts to its settings (Streamlit AppTest).
 
 ## License
