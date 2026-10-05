@@ -4,6 +4,7 @@
 [![Tests](https://github.com/PachkaKofe04/drop_finder/actions/workflows/tests.yml/badge.svg)](https://github.com/PachkaKofe04/drop_finder/actions/workflows/tests.yml)
 ![Python 3.11](https://img.shields.io/badge/python-3.11-blue)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Prototype anti-fraud tool for detecting money mule ("drop") cards from card transfer history.
 
@@ -15,6 +16,8 @@ explainable rule-based detection with accuracy metrics, and a Streamlit dashboar
 money flow graph.
 
 **Live demo:** [drop-finder.streamlit.app](https://drop-finder.streamlit.app) (synthetic data only).
+
+![Suspicious cards with risk scores and reasons](docs/list.png)
 
 ## Quick start
 
@@ -43,6 +46,22 @@ On Linux / macOS activate the environment with `source .venv/bin/activate`.
 | `app.py` | Streamlit dashboard |
 | `tests/` | pytest suite |
 | `data/` | CSV files, not tracked by git |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    G["generator.py<br>synthetic data"] --> T(["transactions<br>in the common format"])
+    R["real bank export<br>CSV"] --> L["loader.py<br>validation, card masking"] --> T
+    T --> D["detectors.py<br>3 explainable rules"]
+    D --> M["metrics.py<br>precision / recall"]
+    GT["ground truth"] --> M
+    D --> A["app.py<br>Streamlit dashboard"]
+    F["flow_graph.py<br>networkx + pyvis"] --> A
+```
+
+Every component after the loader works with one data format, so the same detection code runs
+on synthetic data and on real exports.
 
 ## Data format
 
@@ -185,6 +204,10 @@ streamlit run app.py
   that follows the chain through other suspicious cards;
 - network view of all suspicious cards and their direct links.
 
+![Card drill-down: a transit chain from the victim through two mule cards to an ATM](docs/card.png)
+
+![Network view of all suspicious cards](docs/network.png)
+
 **Demo mode.** Uploading files is only available when the app is opened on `localhost`.
 A public deployment, such as Streamlit Community Cloud, works on synthetic data only,
 so that nobody uploads real customer data to a public server. To allow uploads on your own
@@ -205,3 +228,7 @@ look-alikes stay below detection thresholds, that the loader handles messy real 
 (Windows-1251, `;`, Russian headers, mixed date formats, currency in amounts, full card numbers),
 that each detection rule fires on its pattern and stays silent on hand-made near misses,
 and that the dashboard builds without errors and reacts to its settings (Streamlit AppTest).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
