@@ -16,6 +16,8 @@ explainable rule-based detection with accuracy metrics, money tracing from a vic
 and a Streamlit dashboard with an interactive money flow graph.
 
 **Live demo:** [drop-finder.streamlit.app](https://drop-finder.streamlit.app) (synthetic data only).
+The free hosting puts the app to sleep when nobody has opened it for a while. If you see a sleeping page,
+press "Yes, get this app back up!" and wait about 30 seconds.
 
 ![Suspicious cards with risk scores and reasons](docs/list.png)
 
