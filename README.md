@@ -11,7 +11,7 @@ Prototype anti-fraud tool for detecting money mule ("drop") cards from card tran
 A money mule card is used to receive stolen money and pass it on: to other cards or out through an ATM.
 drop_finder looks for the patterns such cards leave in transaction data.
 
-What is inside: a synthetic data generator with hidden mule schemes, a loader for real bank exports,
+What is inside: a synthetic data generator with hidden mule schemes at two difficulty levels, a loader for real bank exports,
 explainable rule-based detection with accuracy metrics, money tracing from a victim to the ATM,
 and a Streamlit dashboard with an interactive money flow graph.
 
@@ -104,6 +104,30 @@ Hidden schemes:
 Regular clients also include legitimate look-alikes, so that a detector has something to get wrong:
 group money collections (many small transfers to one card) and cash withdrawals right after payday.
 
+### Hard mode
+
+```
+python generator.py --seed 42 --difficulty hard
+```
+
+In the default easy mode every scheme stays inside the detection thresholds by construction:
+transit hops take 1-3 hours against a 6-hour window, funnels have 8-15 senders against a minimum of 8.
+That is why recall is 100% there. Hard mode keeps the easy data unchanged and adds schemes
+that stay just outside the rules, the way real mules adapt:
+
+| Scheme | Pattern | Slips past |
+|---|---|---|
+| `split` | Victim -> hub -> 3-4 mules -> ATM. The hub holds the money for 7-24 hours, the mules withdraw it under a daily limit | transit (6-hour window), fast cash-out (1-hour window) |
+| `warmup` | 2-4 weeks of ordinary activity, then a large amount is withdrawn in parts over a day | fast cash-out, transit |
+| `p2p` | A "crypto seller" gets paid by different people once every 7-16 hours for 5-10 days and cashes out every 1-2 days | funnel (never 8 senders within 48 hours) |
+
+It also adds two more legitimate look-alikes:
+
+- a large purchase paid from one's own second card: the money arrives and 95-100% of it goes to the seller
+  within 1-4 hours, exactly like transit;
+- a self-employed tutor: payments from many different people all month, like a P2P mule,
+  but with round amounts and returning customers, and the money stays on the card.
+
 ## Real data
 
 `loader.py` accepts real bank exports in CSV:
@@ -176,21 +200,54 @@ on real exports and just saves the list to `data/suspicious.csv`.
 
 ### Results on synthetic data
 
-`python metrics.py --seeds 20`
+`python metrics.py --seeds 20` and `python metrics.py --seeds 20 --difficulty hard`
 
 | | Precision | Recall | F1 |
 |---|---|---|---|
-| Seed 42 | 93.3% | 100% | 96.6% |
-| Mean over 20 seeds | 94.6% | 100% | 97.1% |
-| Worst seed | 87.5% | 100% | 93.3% |
+| Easy, seed 42 | 93.3% | 100% | 96.6% |
+| Easy, mean over 20 seeds | 94.6% | 100% | 97.1% |
+| Easy, worst seed | 87.5% | 100% | 93.3% |
+| Hard, seed 42 | 75.0% | 53.6% | 62.5% |
+| Hard, mean over 20 seeds | 74.7% | 51.0% | 60.6% |
+| Hard, worst seed | 70.0% | 48.3% | 57.1% |
 
-All 17 false positives over 20 seeds come from the transit rule: a regular client receives
+In easy mode all 17 false positives over 20 seeds come from the transit rule: a regular client receives
 10-53 thousand rubles and happens to send about the same amount within a few hours. The legitimate look-alikes
 (group collections, cash after payday) produce none. False positives get the lowest risk score (70),
 while real transit chains get 90.
 
-**Caveat:** the rules and the generator were written by the same author, so these numbers are optimistic.
-Real data is noisier, and the thresholds will need tuning on it.
+**Caveat:** the rules and the generator were written by the same author, so the easy numbers are optimistic.
+Hard mode shows how fast they drop once mules behave a little differently. Real data is noisier still,
+and the thresholds will need tuning on it.
+
+### What the rules miss
+
+Recall by scheme in hard mode, 20 seeds:
+
+| Scheme | Mule cards | Caught | Recall |
+|---|---|---|---|
+| `transit` | 120 | 120 | 100% |
+| `funnel` | 80 | 80 | 100% |
+| `fast_cashout` | 80 | 80 | 100% |
+| `split` | 179 | 0 | 0% |
+| `warmup` | 60 | 0 | 0% |
+| `p2p` | 40 | 5 | 12.5% |
+
+- `split`: no card passes on 90% of the money within 6 hours or withdraws 80% within an hour.
+  Money tracing still follows such a chain to the ATM (with seed 42, 94% of the victim's money
+  is withdrawn in cash through 4 cards), but tracing has to start from a flagged card.
+- `warmup`: the cash-out is spread over a day, so it is neither fast nor transit. The weeks
+  of ordinary history do not matter to the rules at all: they look at single events,
+  not at a change in how a card behaves.
+- `p2p`: payments come too rarely for the funnel window. The 5 caught cards were caught by the transit
+  rule by chance, when a cash withdrawal happened to match one payment.
+
+There are 97 false positives over 20 seeds. 80 of them are the own-second-card look-alike: the transit rule
+flags every one of them. The other 17 are the same regular clients as in easy mode. The self-employed
+look-alike produces none, because no rule looks at many senders over a long period. A P2P detector
+would have to, and this look-alike is there to keep it honest.
+
+The rules were deliberately not tuned to hard mode. It is a baseline for the next detector to beat.
 
 Performance: about 6 seconds for 1 million operations. Operations are indexed by (card, time) keys
 and searched with binary search instead of row-by-row loops.
@@ -201,9 +258,11 @@ and searched with binary search instead of row-by-row loops.
 streamlit run app.py
 ```
 
-- data source: synthetic data (seed, number of clients) or your own CSV with an optional ground truth file;
+- data source: synthetic data (seed, number of clients, easy or hard mode) or your own CSV
+  with an optional ground truth file;
 - rule thresholds in the sidebar, the list and the metrics update immediately;
 - suspicious cards with risk, rules and reasons, CSV download;
+- with a ground truth: recall for each scheme and the list of missed mule cards;
 - card drill-down: every rule hit, the card's operations and an interactive money flow graph
   that follows the chain through other suspicious cards;
 - network view of all suspicious cards and their direct links;
@@ -244,8 +303,9 @@ ruff check .
 
 GitHub Actions runs the same on every push: lint, tests and coverage (the build fails below 90%).
 
-The tests check that every hidden scheme matches its definition, that the legitimate
-look-alikes stay below detection thresholds, that the loader handles messy real exports
+The tests check that every hidden scheme matches its definition in both modes, that easy mode stays
+exactly the same (the numbers above depend on it) and hard mode only adds to it, that the legitimate
+look-alikes match their descriptions, that the loader handles messy real exports
 (Windows-1251, `;`, Russian headers, mixed date formats, currency in amounts, full card numbers),
 that each detection rule fires on its pattern and stays silent on hand-made near misses,
 that money tracing never loses or double-counts money (splits, cycles, horizons, step limits),

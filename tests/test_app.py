@@ -57,6 +57,18 @@ def test_other_seed(app):
     assert metrics(app)["Операций"] != "2 998"
 
 
+def test_hard_synthetic(app):
+    """Сложная синтетика: больше операций, полнота показана и по новым схемам."""
+    schemes = app.dataframe[1].value
+    assert list(schemes["scheme"]) == ["Быстрое обналичивание", "Воронка", "Транзит"]
+
+    difficulty = next(r for r in app.sidebar.radio if r.label == "Сложность синтетики")
+    difficulty.set_value("hard").run()
+    assert not app.exception
+    assert int(metrics(app)["Операций"].replace(" ", "")) > 2998
+    assert {"Разветвление", "Прогрев", "P2P-дроп"} <= set(app.dataframe[1].value["scheme"])
+
+
 def test_money_tracing_tab(app):
     assert metrics(app)["Прослежено"] == "179 000 ₽"
     assert metrics(app)["Снято наличными"] == "171 400 ₽"

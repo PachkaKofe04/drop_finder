@@ -1,5 +1,6 @@
 """Тесты генератора: воспроизводимость, формат данных и каждая спрятанная схема."""
 
+import hashlib
 import random
 import sys
 
@@ -12,11 +13,28 @@ from loader import ATM, COLUMNS, EXTERNAL, load_ground_truth, load_transactions
 HOUR = pd.Timedelta(hours=1)
 MASKED_CARD = r"\d{4} \*{4} \*{4} \d{4}"
 
+# Контрольная сумма простого режима, seed 42. На нём посчитаны цифры в README,
+# поэтому простой режим меняется только осознанно - вместе с этой строкой и README.
+EASY_SEED_42_SHA256 = "d67d42870f86d9794844b820600e18d58c983b20350926bd9fcd3266f1866d89"
+
 
 def scheme_cards(ground_truth: pd.DataFrame, scheme_id: str) -> dict:
     """Роль -> карта для одного экземпляра схемы."""
     rows = ground_truth[ground_truth["scheme_id"] == scheme_id]
     return dict(zip(rows["role"], rows["card"], strict=True))
+
+
+def withdrawals(tx: pd.DataFrame, card: str, start, hours: float) -> pd.Series:
+    """Суммы снятий карты в интервале (start, start + hours]."""
+    cash = tx[(tx["sender_card"] == card) & (tx["op_type"] == "cash_withdrawal")
+              & (tx["datetime"] > start) & (tx["datetime"] <= start + hours * HOUR)]
+    return cash["amount"]
+
+
+@pytest.fixture(params=["synthetic", "synthetic_hard"])
+def any_synthetic(request):
+    """Общие свойства формата проверяются в обоих режимах."""
+    return request.getfixturevalue(request.param)
 
 
 # --- Воспроизводимость и формат ----------------------------------------------
@@ -34,8 +52,8 @@ def test_different_seed_gives_different_data():
     assert not tx1.equals(tx2)
 
 
-def test_columns_and_period(synthetic):
-    tx, _ = synthetic
+def test_columns_and_period(any_synthetic):
+    tx, _ = any_synthetic
     start = pd.Timestamp(generator.START_DATE)
     assert list(tx.columns) == COLUMNS
     assert tx["datetime"].min() >= start
@@ -43,14 +61,14 @@ def test_columns_and_period(synthetic):
     assert tx["datetime"].is_monotonic_increasing
 
 
-def test_cards_are_masked(synthetic):
-    tx, _ = synthetic
+def test_cards_are_masked(any_synthetic):
+    tx, _ = any_synthetic
     cards = pd.concat([tx["sender_card"], tx["receiver_card"]])
     assert cards[~cards.isin([ATM, EXTERNAL])].str.fullmatch(MASKED_CARD).all()
 
 
-def test_operation_types(synthetic):
-    tx, _ = synthetic
+def test_operation_types(any_synthetic):
+    tx, _ = any_synthetic
     assert set(tx["op_type"]) == {"transfer", "cash_withdrawal", "top_up"}
     # ATM - только получатель при снятии, EXTERNAL - только отправитель при пополнении
     assert ((tx["receiver_card"] == ATM) == (tx["op_type"] == "cash_withdrawal")).all()
@@ -169,6 +187,136 @@ def test_regular_cards_have_no_fast_cashout(synthetic):
         assert cash["amount"].sum() < 0.9 * row["amount"]
 
 
+# --- Сложный режим -------------------------------------------------------------
+
+def test_easy_mode_is_frozen(synthetic):
+    tx, gt = synthetic
+    data = tx.to_csv(index=False, lineterminator="\n") + gt.to_csv(index=False, lineterminator="\n")
+    assert hashlib.sha256(data.encode()).hexdigest() == EASY_SEED_42_SHA256
+
+
+def test_hard_mode_is_easy_plus_extras(synthetic, synthetic_hard):
+    """Все операции и дропы простого режима входят в сложный без изменений."""
+    tx, gt = synthetic
+    tx_hard, gt_hard = synthetic_hard
+    assert len(tx_hard) > len(tx)
+    assert (tx.merge(tx_hard, how="left", indicator=True)["_merge"] == "both").all()
+    pd.testing.assert_frame_equal(gt_hard.head(len(gt)), gt)
+
+
+def test_hard_mode_is_reproducible(synthetic_hard):
+    tx, gt = generator.generate(42, 200, generator.HARD)
+    pd.testing.assert_frame_equal(tx, synthetic_hard[0])
+    pd.testing.assert_frame_equal(gt, synthetic_hard[1])
+
+
+def test_unknown_difficulty():
+    with pytest.raises(ValueError, match="сложность"):
+        generator.generate(42, 200, "medium")
+
+
+def test_hard_ground_truth(synthetic_hard):
+    tx, gt = synthetic_hard
+    assert gt["card"].is_unique
+    assert gt.groupby("scheme")["scheme_id"].nunique().to_dict() == {
+        "transit": generator.N_TRANSIT, "funnel": generator.N_FUNNEL, "fast_cashout": generator.N_FAST_CASHOUT,
+        "split": generator.N_SPLIT, "warmup": generator.N_WARMUP, "p2p": generator.N_P2P,
+    }
+    # Обычные карты: 200 клиентов и вторые карты из ловушки «покупка со своей второй карты»
+    cards = set(tx["sender_card"]) | set(tx["receiver_card"])
+    assert len(cards - set(gt["card"]) - {ATM, EXTERNAL}) == 200 + 200 // 50
+
+
+@pytest.mark.parametrize("scheme_id", [f"split_{i}" for i in range(1, generator.N_SPLIT + 1)])
+def test_split(synthetic_hard, scheme_id):
+    """Распределитель выжидает 7-24 часа и раздаёт деньги 3-4 дропам, те снимают с дневным лимитом."""
+    tx, gt = synthetic_hard
+    rows = gt[gt["scheme_id"] == scheme_id]
+    hub = rows.loc[rows["role"] == "hub", "card"].item()
+    branches = set(rows.loc[rows["role"] == "branch", "card"])
+    assert 3 <= len(branches) <= 4
+
+    incoming = tx[(tx["receiver_card"] == hub) & (tx["op_type"] == "transfer")]
+    assert len(incoming) == 1
+    victim_tx = incoming.iloc[0]
+
+    parts = tx[(tx["sender_card"] == hub) & (tx["op_type"] == "transfer")]
+    assert sorted(parts["receiver_card"]) == sorted(branches)
+    delays = parts["datetime"] - victim_tx["datetime"]
+    assert delays.min() >= 7 * HOUR and delays.max() <= 24 * HOUR
+    assert 0.95 <= parts["amount"].sum() / victim_tx["amount"] <= 0.99 + 0.01
+
+    for part in parts.itertuples():
+        # За 6 часов снято не больше половины, за сутки с небольшим - почти всё
+        assert withdrawals(tx, part.receiver_card, part.datetime, 6).sum() <= 0.5 * part.amount
+        assert withdrawals(tx, part.receiver_card, part.datetime, 26).sum() >= 0.9 * part.amount
+
+
+@pytest.mark.parametrize("scheme_id", [f"warmup_{i}" for i in range(1, generator.N_WARMUP + 1)])
+def test_warmup(synthetic_hard, scheme_id):
+    """Недели обычной жизни, потом крупное поступление и снятие с дневным лимитом."""
+    tx, gt = synthetic_hard
+    drop = scheme_cards(gt, scheme_id)["cashout"]
+    ops = tx[(tx["sender_card"] == drop) | (tx["receiver_card"] == drop)]
+
+    big = ops.loc[ops.loc[ops["receiver_card"] == drop, "amount"].idxmax()]
+    assert big["amount"] >= 80_000
+    assert big["datetime"] >= pd.Timestamp(generator.START_DATE) + pd.Timedelta(days=14)
+
+    # До схемы карта живёт как обычная: доходы, переводы знакомым
+    history = ops[ops["datetime"] < big["datetime"].normalize()]
+    assert {"top_up", "transfer"} <= set(history["op_type"])
+    assert (history["amount"] < 80_000).all()
+
+    assert withdrawals(tx, drop, big["datetime"], 6).sum() <= 0.4 * big["amount"]
+    assert 0.84 <= withdrawals(tx, drop, big["datetime"], 26).sum() / big["amount"] <= 0.95
+    assert ops["datetime"].max() <= big["datetime"] + 26 * HOUR
+
+
+@pytest.mark.parametrize("scheme_id", [f"p2p_{i}" for i in range(1, generator.N_P2P + 1)])
+def test_p2p(synthetic_hard, scheme_id):
+    """Покупатели платят по одному раз в 7-16 часов, суммы некруглые, накопленное регулярно снимается."""
+    tx, gt = synthetic_hard
+    drop = scheme_cards(gt, scheme_id)["receiver"]
+
+    incoming = tx[(tx["receiver_card"] == drop) & (tx["op_type"] == "transfer")]
+    assert len(incoming) >= 8
+    assert incoming["sender_card"].is_unique
+    gaps = incoming["datetime"].diff().dropna()
+    assert gaps.min() >= 7 * HOUR and gaps.max() <= 16 * HOUR   # за любые 48 часов не больше 7
+    assert (incoming["amount"] % 100 != 0).mean() > 0.5
+
+    first, last = incoming["datetime"].min(), incoming["datetime"].max()
+    cash = withdrawals(tx, drop, first, (last - first) / HOUR + 41)
+    assert 0.85 <= cash.sum() / incoming["amount"].sum() <= 1
+
+
+def test_own_card_payment_looks_like_transit():
+    """Деньги приходят на вторую карту владельца и через 1-4 часа почти целиком уходят продавцу."""
+    random.seed(0)
+    cards = [f"card_{i}" for i in range(50)]
+    first, second = pd.DataFrame(generator.own_card_payments(cards, count=1)).itertuples()
+
+    assert first.sender_card in cards and first.receiver_card not in cards
+    assert second.sender_card == first.receiver_card
+    assert second.receiver_card in cards and second.receiver_card != first.sender_card
+    assert HOUR <= second.datetime - first.datetime <= 4 * HOUR
+    assert 0.95 <= second.amount / first.amount <= 1
+
+
+def test_self_employed_looks_like_p2p():
+    """Много поступлений от разных людей, но суммы круглые и клиенты платят повторно."""
+    random.seed(0)
+    cards = [f"card_{i}" for i in range(50)]
+    ops = pd.DataFrame(generator.self_employed(cards, count=1))
+
+    assert ops["receiver_card"].nunique() == 1
+    assert 20 <= len(ops) <= 35
+    assert 8 <= ops["sender_card"].nunique() <= 20
+    assert ops["sender_card"].duplicated().any()
+    assert (ops["amount"] % 500 == 0).all()
+
+
 # --- Запуск из командной строки -----------------------------------------------
 
 def test_cli_writes_files_readable_by_loader(tmp_path, monkeypatch):
@@ -181,6 +329,15 @@ def test_cli_writes_files_readable_by_loader(tmp_path, monkeypatch):
     assert warnings == []
     assert len(gt) == 2 * generator.N_TRANSIT + 2 * generator.N_FUNNEL + generator.N_FAST_CASHOUT
     assert set(gt["card"]) <= set(tx["sender_card"]) | set(tx["receiver_card"])
+
+
+def test_cli_hard(tmp_path, monkeypatch):
+    monkeypatch.setattr(generator, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["generator.py", "--seed", "7", "--clients", "50", "--difficulty", "hard"])
+    generator.main()
+
+    gt = load_ground_truth(tmp_path / "ground_truth.csv")
+    assert set(gt["scheme"]) == {"transit", "funnel", "fast_cashout", "split", "warmup", "p2p"}
 
 
 def test_cli_rejects_too_few_clients(monkeypatch):

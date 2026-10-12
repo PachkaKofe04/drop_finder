@@ -4,6 +4,7 @@
 Проверка на многих синтетических наборах, чтобы хорошие цифры
 не оказались удачей одного seed:
     python metrics.py --seeds 20
+    python metrics.py --seeds 20 --difficulty hard
 """
 
 import argparse
@@ -67,29 +68,40 @@ def format_report(result: Evaluation) -> str:
     return "\n".join(lines)
 
 
-def benchmark(seeds, n_clients: int = 200) -> pd.DataFrame:
-    """Метрики детектора на синтетических наборах с разными seed, по строке на seed."""
-    rows = []
+def benchmark(seeds, n_clients: int = 200, difficulty: str = generator.EASY) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Метрики детектора на синтетических наборах с разными seed.
+
+    Возвращает (по строке на seed, полнота по схемам на всех наборах вместе).
+    """
+    rows, schemes = [], []
     for seed in seeds:
-        transactions, truth = generator.generate(seed, n_clients)
+        transactions, truth = generator.generate(seed, n_clients, difficulty)
         result = evaluate(detect(transactions), truth)
         rows.append({"seed": seed, "precision": result.precision, "recall": result.recall, "f1": result.f1,
                      "false_positives": len(result.false_positives), "missed": len(result.missed)})
-    return pd.DataFrame(rows)
+        schemes.append(result.by_scheme)
+
+    by_scheme = pd.concat(schemes).groupby("scheme")[["drops", "caught"]].sum()
+    by_scheme["recall"] = by_scheme["caught"] / by_scheme["drops"]
+    return pd.DataFrame(rows), by_scheme.reset_index()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Точность детектора на синтетических данных")
     parser.add_argument("--seeds", type=int, default=20, help="сколько наборов проверить (по умолчанию 20)")
     parser.add_argument("--clients", type=int, default=200, help="клиентов в каждом наборе (по умолчанию 200)")
+    parser.add_argument("--difficulty", choices=generator.DIFFICULTIES, default=generator.EASY,
+                        help="сложность синтетики, см. generator.py (по умолчанию easy)")
     args = parser.parse_args()
 
-    table = benchmark(range(1, args.seeds + 1), args.clients)
+    table, by_scheme = benchmark(range(1, args.seeds + 1), args.clients, args.difficulty)
     percent = "{:.1%}".format
     print(table.to_string(index=False, formatters={"precision": percent, "recall": percent, "f1": percent}))
     print(f"\nВ среднем на {args.seeds} наборах: precision {table['precision'].mean():.1%}, "
           f"recall {table['recall'].mean():.1%}, F1 {table['f1'].mean():.1%}")
     print(f"Худший набор: precision {table['precision'].min():.1%}, recall {table['recall'].min():.1%}")
+    print("\nПолнота по схемам на всех наборах:")
+    print(by_scheme.to_string(index=False, formatters={"recall": percent}))
 
 
 if __name__ == "__main__":

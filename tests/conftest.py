@@ -12,3 +12,9 @@ def synthetic():
     Генерируются один раз на весь прогон. Тесты не должны их менять.
     """
     return generator.generate(42, 200)
+
+
+@pytest.fixture(scope="session")
+def synthetic_hard():
+    """То же для сложного режима (seed 42): (transactions, ground_truth)."""
+    return generator.generate(42, 200, generator.HARD)

@@ -27,6 +27,8 @@ from tracing import to_sankey, trace
 
 REPO_URL = "https://github.com/PachkaKofe04/drop_finder"
 RULE_TITLES = {TRANSIT: "Транзит", FUNNEL: "Воронка", FAST_CASHOUT: "Быстрое обналичивание"}
+SCHEME_TITLES = {**RULE_TITLES, "split": "Разветвление", "warmup": "Прогрев", "p2p": "P2P-дроп"}
+DIFFICULTY_TITLES = {generator.EASY: "Простая", generator.HARD: "Сложная"}
 OP_TITLES = {"transfer": "перевод", "cash_withdrawal": "снятие", "top_up": "пополнение", "other": "другое"}
 SYNTHETIC, UPLOAD = "Синтетика", "Свой файл"
 
@@ -42,8 +44,8 @@ def uploads_allowed() -> bool:
 
 
 @st.cache_data(show_spinner="Генерирую синтетические данные...")
-def synthetic_data(seed: int, clients: int):
-    return generator.generate(seed, clients)
+def synthetic_data(seed: int, clients: int, difficulty: str):
+    return generator.generate(seed, clients, difficulty)
 
 
 @st.cache_data(show_spinner="Читаю файл...")
@@ -74,7 +76,11 @@ def data_sidebar():
     if source == SYNTHETIC:
         seed = st.sidebar.number_input("Seed", min_value=0, max_value=10_000, value=42)
         clients = st.sidebar.slider("Обычных клиентов", min_value=50, max_value=1000, value=200, step=50)
-        transactions, truth = synthetic_data(seed, clients)
+        difficulty = st.sidebar.radio(
+            "Сложность синтетики", generator.DIFFICULTIES, format_func=DIFFICULTY_TITLES.get, horizontal=True,
+            help="Простая: схемы укладываются в пороги правил. Сложная: добавлены схемы, которые эти пороги "
+                 "обходят (разветвление, прогрев, P2P-дроп), и ещё две ловушки. Подробнее - «Как это работает».")
+        transactions, truth = synthetic_data(seed, clients, difficulty)
         return transactions, truth, []
 
     tx_file = st.sidebar.file_uploader("Операции, CSV", type=["csv", "txt"])
@@ -132,6 +138,11 @@ def money(value: float) -> str:
     return f"{value:,.0f}".replace(",", " ") + " ₽"
 
 
+def scheme_titles(schemes: pd.Series) -> pd.Series:
+    """Названия схем по-русски; незнакомые (из своей разметки) остаются как есть."""
+    return schemes.map(SCHEME_TITLES).fillna(schemes)
+
+
 def duration(delta: pd.Timedelta) -> str:
     minutes = int(delta.total_seconds() // 60)
     hours, minutes = divmod(minutes, 60)
@@ -181,9 +192,25 @@ def show_table(suspicious: pd.DataFrame, drops: set, result):
     st.download_button("Скачать список, CSV", suspicious.to_csv(index=False).encode("utf-8-sig"),
                        file_name="suspicious.csv", mime="text/csv")
 
-    if result is not None and not result.missed.empty:
+    if result is None:
+        return
+    st.subheader("Полнота по схемам")
+    st.dataframe(result.by_scheme.assign(scheme=scheme_titles(result.by_scheme["scheme"])),
+                 hide_index=True, column_config={
+                     "scheme": "Схема",
+                     "drops": "Дроп-карт",
+                     "caught": "Найдено",
+                     "recall": st.column_config.NumberColumn("Recall", format="percent"),
+                 })
+    if not result.missed.empty:
         st.subheader("Пропущенные дроп-карты")
-        st.dataframe(result.missed, hide_index=True)
+        st.dataframe(result.missed.assign(scheme=scheme_titles(result.missed["scheme"])), hide_index=True,
+                     height=min(38 + 35 * len(result.missed), 700), column_config={
+                         "card": st.column_config.TextColumn("Карта", width="medium"),
+                         "scheme": "Схема",
+                         "scheme_id": "Экземпляр схемы",
+                         "role": "Роль",
+                     })
 
 
 def show_legend(with_truth: bool):
@@ -312,6 +339,19 @@ def show_about():
 
 В синтетических данных спрятаны три схемы, а среди обычных клиентов есть **ловушки**:
 складчина (много мелких переводов на одну карту) и снятие наличных сразу после зарплаты.
+
+**Сложная синтетика.** В простом режиме схемы укладываются в пороги правил, поэтому recall там 100%.
+В сложном добавлены схемы, которые эти пороги обходят, как это делают настоящие дропы:
+
+| Схема | Как обходит правила |
+|---|---|
+| Разветвление | Распределитель выжидает 7-24 часа и раздаёт деньги 3-4 дропам, те снимают с дневным лимитом |
+| Прогрев | Недели обычной жизни перед схемой, потом крупная сумма снимается частями за сутки |
+| P2P-дроп | Покупатели платят по одному раз в 7-16 часов, за 48 часов меньше 8 отправителей |
+
+И ещё две ловушки: покупка со своей второй карты (похожа на транзит) и самозанятый
+(много оплат от разных людей, как у P2P-дропа). Правила под сложный режим не подстраивались:
+он показывает, где они ошибаются. Полнота по каждой схеме - под списком подозрительных карт.
 
 Код, тесты и описание: [{REPO_URL}]({REPO_URL})
 """)

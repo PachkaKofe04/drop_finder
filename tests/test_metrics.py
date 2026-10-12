@@ -5,6 +5,7 @@ import sys
 import pandas as pd
 import pytest
 
+import generator
 import metrics
 from detectors import detect
 from metrics import benchmark, evaluate, format_report
@@ -49,12 +50,31 @@ def test_detector_on_seed_42(synthetic):
 
 def test_detector_on_several_seeds():
     """Хорошие цифры не должны быть удачей одного seed."""
-    table = benchmark(range(1, 6))
+    table, by_scheme = benchmark(range(1, 6))
+    assert list(table["seed"]) == [1, 2, 3, 4, 5]
     assert (table["recall"] == 1.0).all()
     assert table["precision"].min() >= 0.85
+    assert list(by_scheme["scheme"]) == ["fast_cashout", "funnel", "transit"]
+    assert (by_scheme["caught"] == by_scheme["drops"]).all()
+
+
+def test_benchmark_hard():
+    """В сложном режиме полнота считается по всем шести схемам и складывается по всем наборам."""
+    table, by_scheme = benchmark(range(1, 3), difficulty=generator.HARD)
+    assert set(by_scheme["scheme"]) == {"transit", "funnel", "fast_cashout", "split", "warmup", "p2p"}
+    assert by_scheme["drops"].sum() - by_scheme["caught"].sum() == table["missed"].sum()
+    assert (by_scheme["recall"] == by_scheme["caught"] / by_scheme["drops"]).all()
 
 
 def test_cli(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["metrics.py", "--seeds", "2", "--clients", "60"])
     metrics.main()
-    assert "В среднем на 2 наборах" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "В среднем на 2 наборах" in out
+    assert "Полнота по схемам" in out
+
+
+def test_cli_hard(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["metrics.py", "--seeds", "1", "--clients", "50", "--difficulty", "hard"])
+    metrics.main()
+    assert "split" in capsys.readouterr().out
