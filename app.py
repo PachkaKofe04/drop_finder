@@ -20,6 +20,13 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import hot_reload
+
+# Модули проекта, изменившиеся на диске после git pull, перечитываются до импорта (см. hot_reload.py),
+# и кэш сбрасывается: иначе демо отдавало бы данные, посчитанные старым кодом
+if hot_reload.reload_changed():
+    st.cache_data.clear()
+
 import generator
 import theme
 from detectors import FAST_CASHOUT, FUNNEL, MITIGATION, RULE_NAMES, TRANSIT, Rules, find_events, summarize
