@@ -16,7 +16,7 @@ REAL_EXPORT = """Дата операции;Карта отправителя;К�
 25.09.2026 15:00;2202201123454821;;-5 000,00;Снятие наличных
 26.09.2026 09:05;;4276123456789012;45000;Зачисление зарплаты
 26.09.2026 10:00;;2202201123454821;3000;Пополнение наличными
-2026-09-27 11:00:00;2202 9999 0000 4821;tok_abc123;700,5;Оплата услуг
+2026-09-27 11:00:00;2202 9999 0000 4821;tok_abc123;700,5;Списание по требованию
 не дата;2202201123454821;4276123456789012;100;Перевод
 27.09.2026 12:00;2202201123454821;4276123456789012;abc;Перевод
 """
@@ -68,7 +68,7 @@ def test_real_export_fills_atm_and_external(real_export):
 def test_real_export_reports_problems(real_export):
     _, warnings = real_export
     report = "\n".join(warnings)
-    assert "Оплата услуг" in report
+    assert "Списание по требованию" in report
     assert "«дата не распознана»: 1" in report
     assert "«сумма не распознана или равна 0»: 1" in report
     assert "Всего отброшено строк: 2 из 7" in report
@@ -163,7 +163,11 @@ def test_mixed_date_formats_keep_day_and_month():
     ("ATM withdrawal", "cash_withdrawal"),
     ("Пополнение наличными", "top_up"),  # «наличные» не должны сделать это снятием
     ("Зачисление зарплаты", "top_up"),
-    ("Оплата услуг", OTHER),
+    ("Оплата услуг", "payment"),
+    ("Покупка. Пятёрочка", "payment"),
+    ("Погашение кредита", "payment"),
+    ("Перевод в счёт оплаты", "transfer"),
+    ("Списание по требованию", OTHER),
 ])
 def test_operation_type_keywords(text, expected):
     assert loader._normalize_op_type(text) == expected

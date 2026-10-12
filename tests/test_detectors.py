@@ -169,6 +169,105 @@ def test_empty_input():
     assert detect(ops()).empty
 
 
+# --- Честные люди: оплаты и смягчающие обстоятельства -------------------------------
+
+def events_of(tx: pd.DataFrame, card: str, rules: Rules | None = None) -> pd.DataFrame:
+    events = find_events(tx, rules)
+    return events[events["card"] == card]
+
+
+def test_payment_is_not_passing_money_on():
+    """Ипотека с перевода супруга: деньги ушли оплатой в банк - это трата, а не транзит."""
+    paid = ops((0, "spouse", "card", 50_000, "transfer"), (120, "card", "Банк: ипотека", 50_000, "payment"))
+    passed = ops((0, "spouse", "card", 50_000, "transfer"), (120, "card", "stranger", 50_000, "transfer"))
+    assert flagged(paid, TRANSIT) == set()
+    assert flagged(passed, TRANSIT) == {"card"}
+
+
+def test_known_sender_mitigates_transit():
+    """Родители уже переводили на эту карту - деньги на ремонт от них не делают карту транзитной."""
+    tx = ops(
+        (-5 * 24 * 60, "parent", "card", 3_000, "transfer"),
+        (0, "parent", "card", 200_000, "transfer"),
+        (120, "card", "builder", 195_000, "transfer"),
+    )
+    event = events_of(tx, "card").iloc[0]
+    assert event["score"] == detectors.SCORES[TRANSIT] - detectors.MITIGATION
+    assert event["mitigation"].startswith("смягчает: отправитель знаком с картой, операции между ними с 05.08")
+    assert detect(tx).empty
+    # Без смягчений - обычное срабатывание и никаких пояснений «смягчает», которые сбили бы аналитика
+    unmitigated = events_of(tx, "card", Rules(mitigate=False)).iloc[0]
+    assert unmitigated["score"] == detectors.SCORES[TRANSIT] and unmitigated["mitigation"] == ""
+    assert set(detect(tx, Rules(mitigate=False))["card"]) == {"card"}
+
+
+def test_known_suspicious_sender_does_not_mitigate():
+    """Дропы заранее «познакомились»: знакомство с транзитной картой риск не снижает."""
+    tx = ops(
+        (-3 * 24 * 60, "drop1", "drop2", 1_000, "transfer"),
+        (0, "victim", "drop1", 100_000, "transfer"),
+        (90, "drop1", "drop2", 98_500, "transfer"),
+        (200, "drop2", ATM, 97_000, "cash_withdrawal"),
+    )
+    assert (events_of(tx, "drop2")["mitigation"] == "").all()
+    assert set(detect(tx)["card"]) == {"drop1", "drop2"}
+
+
+def test_external_top_up_is_never_known():
+    """Пополнения извне были и раньше, но EXTERNAL - не знакомый человек."""
+    tx = ops(
+        (-5 * 24 * 60, EXTERNAL, "drop", 2_000, "top_up"),
+        (0, EXTERNAL, "drop", 120_000, "top_up"),
+        (20, "drop", ATM, 115_000, "cash_withdrawal"),
+    )
+    assert (events_of(tx, "drop")["mitigation"] == "").all()
+    assert set(detect(tx)["card"]) == {"drop"}
+
+
+@pytest.mark.parametrize("employees, mitigated", [(3, True), (2, False)])
+def test_salary_from_employer_of_many_mitigates_cashout(employees, mitigated):
+    """Зарплата от работодателя, который платит многим, снятая целиком, - привычка, а не обналичивание."""
+    rows = [(i, "Работодатель", f"colleague_{i}", 50_000, "top_up") for i in range(employees - 1)]
+    rows += [(0, "Работодатель", "card", 60_000, "top_up"), (30, "card", ATM, 59_000, "cash_withdrawal")]
+    event = events_of(ops(*rows), "card").iloc[0]
+    assert event["rule"] == FAST_CASHOUT
+    assert bool(event["mitigation"]) == mitigated
+    if mitigated:
+        assert "доход от «Работодатель», который платит 3 картам" in event["mitigation"]
+
+
+def test_funnel_compares_outflow_with_everything_received():
+    """Свадьба: 30 гостей по 5 000 ₽, потом половина ушла на накопительный - это не воронка.
+
+    Окно, начатое с середины потока подарков, видит лишь часть денег - сравнивать надо со всем,
+    что пришло за 48 часов до вывода.
+    """
+    gifts = funnel_income(30, minutes_between=12, amount=5_000, hub="couple")
+    assert flagged(ops(*gifts, (12 * 60, "couple", "savings", 75_000, "transfer")), FUNNEL) == set()
+    assert flagged(ops(*gifts, (12 * 60, "couple", "next", 145_000, "transfer")), FUNNEL) == {"couple"}
+
+
+def test_funnel_from_known_senders_is_mitigated():
+    """Деньги собрали в основном знакомые - смягчает, даже если всё ушло поставщику."""
+    known = [(-24 * 60, f"victim_{i}", "hub", 500, "transfer") for i in range(6)]
+    supplier = (12 * 60, "hub", "supplier", 78_000, "transfer")
+    tx = ops(*known, *funnel_income(10, minutes_between=60, amount=8_000), supplier)
+    event = events_of(tx, "hub").iloc[0]
+    assert event["rule"] == FUNNEL
+    # 6 знакомых по 8 000 ₽ из 83 000 ₽ за окно (первые 500 ₽ от них - ещё от незнакомых)
+    assert "смягчает: 58% денег пришло от знакомых карты" in event["mitigation"]
+
+
+def test_extra_rule_bonus_counts_only_strong_events():
+    """Два смягчённых срабатывания не складываются в подозрение."""
+    events = pd.DataFrame({
+        "card": ["a", "a"], "rule": [TRANSIT, FAST_CASHOUT], "score": [25, 30],
+        "time": [T0, T0], "amount": [1.0, 1.0], "reason": ["r1", "r2"], "mitigation": ["m", "m"],
+    })
+    assert detectors.summarize(events).empty
+    assert detectors.summarize(events, min_risk=20)["risk"].iloc[0] == 35
+
+
 # --- Запуск из командной строки -----------------------------------------------
 
 def test_cli(synthetic, tmp_path, monkeypatch, capsys):

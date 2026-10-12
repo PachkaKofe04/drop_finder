@@ -29,8 +29,13 @@ RULE_NAMES = [TRANSIT, FUNNEL, FAST_CASHOUT]
 SCORES = {TRANSIT: 70, FUNNEL: 85, FAST_CASHOUT: 75}
 CHAIN_BONUS = 20       # транзитная карта связана с другими транзитными картами
 EXTRA_RULE_BONUS = 5   # за каждое дополнительное сработавшее правило
+MITIGATION = 45        # смягчающее обстоятельство: оценка опускается ниже порога списка
 
-EVENT_COLUMNS = ["card", "rule", "score", "time", "amount", "reason"]
+# «Деньги ушли дальше» - это перевод человеку или снятие наличных. Оплата организации
+# (ипотека, магазин, клиника, автосалон) - это трата своих денег, а не транзит.
+MOVES = ["transfer", "cash_withdrawal"]
+
+EVENT_COLUMNS = ["card", "rule", "score", "time", "amount", "reason", "mitigation"]
 SUMMARY_COLUMNS = ["card", "risk", "rules", "reason", "first_seen", "events"]
 
 
@@ -59,6 +64,13 @@ class Rules:
     cashout_min_amount: float = 30_000
     cashout_window: pd.Timedelta = pd.Timedelta(hours=1)
     cashout_min_share: float = 0.80
+
+    # Смягчающие обстоятельства: знакомый отправитель, доход от организации, которая
+    # платит многим (работодатель, Соцфонд). Они снижают оценку на MITIGATION.
+    mitigate: bool = True
+    mass_payer_min_cards: int = 3        # столько разных карт пополняет работодатель или фонд
+    funnel_known_share: float = 0.5      # такая доля собранного пришла от знакомых
+    min_risk: int = 50                   # карты с риском ниже в список подозрительных не попадают
 
 
 # --- Быстрый поиск операций карты в интервале времени ------------------------
@@ -117,15 +129,40 @@ def _duration(delta) -> str:
     return f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
 
 
-def _events(cards, rule, scores, times, amounts, reasons) -> pd.DataFrame:
-    return pd.DataFrame({"card": cards, "rule": rule, "score": scores, "time": times,
-                         "amount": amounts, "reason": reasons}, columns=EVENT_COLUMNS)
+def _events(cards, rule, scores, times, amounts, reasons, mitigations="") -> pd.DataFrame:
+    return pd.DataFrame({"card": cards, "rule": rule, "score": scores, "time": times, "amount": amounts,
+                         "reason": reasons, "mitigation": mitigations}, columns=EVENT_COLUMNS)
+
+
+def _first_contacts(tx: pd.DataFrame) -> np.ndarray:
+    """Для каждой операции - время самой первой операции между этими двумя участниками (в любую сторону).
+
+    Если оно раньше самой операции, участники уже знакомы. Так банк отличает перевод
+    знакомому от перевода незнакомцу; у нас история - только то, что есть в данных.
+    """
+    low = np.minimum(tx["sender_code"], tx["receiver_code"]).to_numpy(dtype=np.int64)
+    high = np.maximum(tx["sender_code"], tx["receiver_code"]).to_numpy(dtype=np.int64)
+    first = pd.Series(tx["datetime"].to_numpy()).groupby((low << 32) + high).transform("min")
+    return first.to_numpy()
+
+
+def _known_sender(ops: pd.DataFrame, suspicious_cards: set) -> list:
+    """Смягчение для перевода от знакомого человека.
+
+    Не в счёт: пополнение извне (EXTERNAL - не человек, «знакомым» он быть не может)
+    и знакомство с похожей на транзитную картой - иначе мошенникам хватило бы заранее
+    «познакомить» свои карты.
+    """
+    known = ((ops["op_type"] == "transfer") & (ops["first_contact"] < ops["datetime"])
+             & ~ops["sender_card"].isin(suspicious_cards))
+    return [f"смягчает: отправитель знаком с картой, операции между ними с {since:%d.%m}" if is_known else ""
+            for is_known, since in zip(known, ops["first_contact"], strict=True)]
 
 
 def find_transit(tx: pd.DataFrame, rules: Rules, out_flows: CardFlows) -> pd.DataFrame:
     """Транзит: на карту пришёл перевод, и почти та же сумма быстро ушла дальше.
 
-    Дальше - это перевод, снятие или любая другая исходящая операция.
+    Дальше - это перевод человеку или снятие наличных (см. MOVES).
     Карты, которые передают деньги друг другу, склеиваются в цепочки.
     """
     incoming = tx[(tx["op_type"] == "transfer") & (tx["amount"] >= rules.transit_min_amount)]
@@ -166,33 +203,42 @@ def find_transit(tx: pd.DataFrame, rules: Rules, out_flows: CardFlows) -> pd.Dat
         scores.append(SCORES[TRANSIT] + (CHAIN_BONUS if size > 1 else 0))
 
     return _events(hits["receiver_card"].to_numpy(), TRANSIT, scores, hits["datetime"].to_numpy(),
-                   hits["amount"].to_numpy(), reasons)
+                   hits["amount"].to_numpy(), reasons, _known_sender(hits, set(hits["receiver_card"])))
 
 
 def find_funnels(tx: pd.DataFrame, rules: Rules, names: np.ndarray, out_flows: CardFlows) -> pd.DataFrame:
     """Воронка: за короткое время карта получает деньги от многих разных карт,
     а затем почти всё собранное уходит дальше.
 
-    Второе условие отсекает легальные сборы денег (подарок, складчина):
-    там деньги остаются на карте.
+    Второе условие отсекает легальные сборы денег (подарок, складчина, сбор на лечение):
+    там деньги остаются на карте или уходят оплатой организации.
     """
     incoming = tx[tx["op_type"] == "transfer"]
     in_flows = CardFlows(incoming["receiver_code"], incoming["datetime"], incoming["amount"], incoming["sender_code"])
+    # Те же поступления, но считаются только деньги от знакомых: порядок операций тот же
+    from_known = incoming["amount"].to_numpy(dtype=float) * (incoming["first_contact"] < incoming["datetime"])
+    known_flows = CardFlows(incoming["receiver_code"], incoming["datetime"], from_known, incoming["sender_code"])
 
     # Каждое поступление - начало окна. Сначала дешёвые проверки для всех окон сразу:
     # число поступлений, собранная сумма и сколько ушло после последнего поступления.
-    lo, hi = in_flows.bounds(in_flows.codes, in_flows.times, in_flows.times + rules.funnel_window.to_timedelta64())
+    window = rules.funnel_window.to_timedelta64()
+    lo, hi = in_flows.bounds(in_flows.codes, in_flows.times, in_flows.times + window)
     collected = in_flows.cumsum[hi] - in_flows.cumsum[lo]
     last_in = in_flows.times[np.maximum(hi - 1, 0)]
+    # Долю ушедшего считаем от всего, что пришло за окно до последнего поступления, а не
+    # только от начала этого окна: иначе окно с середины потока подарков сойдёт за воронку
+    full_lo, _ = in_flows.bounds(in_flows.codes, last_in - window, last_in)
+    received = in_flows.cumsum[hi] - in_flows.cumsum[full_lo]
+    known_share = (known_flows.cumsum[hi] - known_flows.cumsum[full_lo]) / np.maximum(received, 1.0)
     sent = out_flows.total(in_flows.codes, last_in + np.timedelta64(1, "s"),
                            last_in + rules.funnel_outflow_window.to_timedelta64())
     candidates = np.flatnonzero((hi - lo >= rules.funnel_min_senders)
                                 & (collected >= rules.funnel_min_total)
-                                & (sent >= rules.funnel_min_outflow_share * collected))
+                                & (sent >= rules.funnel_min_outflow_share * received))
 
     # Дорогая проверка - число разных отправителей - только для прошедших отбор окон.
     # Для каждой карты берём первое подходящее окно.
-    cards, times, amounts, reasons = [], [], [], []
+    cards, times, amounts, reasons, mitigations = [], [], [], [], []
     for i in candidates:
         card = names[in_flows.codes[i]]
         senders = len(set(in_flows.counterparties[lo[i]:hi[i]]))
@@ -203,19 +249,29 @@ def find_funnels(tx: pd.DataFrame, rules: Rules, names: np.ndarray, out_flows: C
         amounts.append(collected[i])
         reasons.append(f"Воронка: за {_duration(last_in[i] - in_flows.times[i])} пришло "
                        f"{_money(collected[i])} от {senders} разных карт, затем ушло "
-                       f"{_money(sent[i])} ({sent[i] / collected[i]:.0%})")
+                       f"{_money(sent[i])} ({sent[i] / received[i]:.0%})")
+        mitigations.append(f"смягчает: {known_share[i]:.0%} денег пришло от знакомых карты"
+                           if known_share[i] >= rules.funnel_known_share else "")
 
-    return _events(cards, FUNNEL, SCORES[FUNNEL], times, amounts, reasons)
+    return _events(cards, FUNNEL, SCORES[FUNNEL], times, amounts, reasons, mitigations)
 
 
-def find_fast_cashouts(tx: pd.DataFrame, rules: Rules, cash_flows: CardFlows) -> pd.DataFrame:
-    """Быстрое обналичивание: крупное поступление почти целиком снято наличными за короткое время."""
+def find_fast_cashouts(tx: pd.DataFrame, rules: Rules, cash_flows: CardFlows, transit_cards: set) -> pd.DataFrame:
+    """Быстрое обналичивание: крупное поступление почти целиком снято наличными за короткое время.
+
+    Смягчает: зарплата или пенсия от организации, которая платит многим, или перевод от знакомого.
+    """
     incoming = tx[tx["op_type"].isin(["transfer", "top_up"]) & (tx["amount"] >= rules.cashout_min_amount)]
     received = incoming["amount"].to_numpy(dtype=float)
     start = incoming["datetime"].to_numpy()
     lo, hi = cash_flows.bounds(incoming["receiver_code"], start, start + rules.cashout_window.to_timedelta64())
     withdrawn = cash_flows.cumsum[hi] - cash_flows.cumsum[lo]
     found = (withdrawn >= rules.cashout_min_share * received) & (hi > lo)
+
+    # Кто платит доход многим картам: работодатель или фонд, а не человек и не «другой банк»
+    top_ups = tx[(tx["op_type"] == "top_up") & (tx["sender_card"] != EXTERNAL)]
+    payers = top_ups.groupby("sender_card")["receiver_card"].nunique()
+    payers = payers[payers >= rules.mass_payer_min_cards]
 
     hits = incoming[found].assign(withdrawn=withdrawn[found], last_cash=cash_flows.times[hi[found] - 1])
     reasons = []
@@ -224,40 +280,59 @@ def find_fast_cashouts(tx: pd.DataFrame, rules: Rules, cash_flows: CardFlows) ->
         reasons.append(f"Быстрое обналичивание: пришло {_money(row.amount)} ({source}), "
                        f"за {_duration(row.last_cash - row.datetime)} снято {_money(row.withdrawn)} "
                        f"({row.withdrawn / row.amount:.0%})")
+    mitigations = [f"смягчает: доход от «{sender}», который платит {payers[sender]} картам (зарплата, пенсия)"
+                   if sender in payers.index else known
+                   for sender, known in zip(hits["sender_card"], _known_sender(hits, transit_cards), strict=True)]
 
     return _events(hits["receiver_card"].to_numpy(), FAST_CASHOUT, SCORES[FAST_CASHOUT],
-                   hits["datetime"].to_numpy(), hits["amount"].to_numpy(), reasons)
+                   hits["datetime"].to_numpy(), hits["amount"].to_numpy(), reasons, mitigations)
 
 
 # --- Итог ------------------------------------------------------------------------
 
 def find_events(tx: pd.DataFrame, rules: Rules | None = None) -> pd.DataFrame:
-    """Все срабатывания всех правил: одна строка - одно срабатывание."""
+    """Все срабатывания всех правил: одна строка - одно срабатывание.
+
+    У срабатывания со смягчающим обстоятельством оценка ниже на MITIGATION,
+    а в колонке mitigation - объяснение. Без rules.mitigate смягчения не применяются.
+    """
     rules = rules or Rules()
     # Нумеруем карты один раз: дальше все поиски идут по числам, а не по строкам
     codes, names = pd.factorize(pd.concat([tx["sender_card"], tx["receiver_card"]], ignore_index=True))
     tx = tx.assign(sender_code=codes[:len(tx)], receiver_code=codes[len(tx):],
                    datetime=pd.to_datetime(tx["datetime"]))
+    tx = tx.assign(first_contact=_first_contacts(tx))
 
-    # Исходящие - всё, что карта отправила: переводы, снятия, прочие платежи
-    out = tx[tx["sender_card"] != EXTERNAL]
-    out_flows = CardFlows(out["sender_code"], out["datetime"], out["amount"], out["receiver_card"])
+    # Ушло дальше - переводы людям и снятия, но не оплаты организациям (см. MOVES)
+    moves = tx[tx["op_type"].isin(MOVES) & (tx["sender_card"] != EXTERNAL)]
+    out_flows = CardFlows(moves["sender_code"], moves["datetime"], moves["amount"], moves["receiver_card"])
     cash = tx[tx["op_type"] == "cash_withdrawal"]
     cash_flows = CardFlows(cash["sender_code"], cash["datetime"], cash["amount"], cash["receiver_card"])
 
+    transit = find_transit(tx, rules, out_flows)
     parts = [
-        find_transit(tx, rules, out_flows),
+        transit,
         find_funnels(tx, rules, np.asarray(names), out_flows),
-        find_fast_cashouts(tx, rules, cash_flows),
+        find_fast_cashouts(tx, rules, cash_flows, set(transit["card"])),
     ]
     parts = [part for part in parts if not part.empty]
     if not parts:
         return pd.DataFrame(columns=EVENT_COLUMNS)
-    return pd.concat(parts, ignore_index=True)
+    events = pd.concat(parts, ignore_index=True)
+    if rules.mitigate:
+        events.loc[events["mitigation"] != "", "score"] -= MITIGATION
+    else:
+        events["mitigation"] = ""
+    return events
 
 
-def summarize(events: pd.DataFrame) -> pd.DataFrame:
-    """Одна строка на карту: итоговый риск, сработавшие правила и главная причина."""
+def summarize(events: pd.DataFrame, min_risk: int = Rules.min_risk) -> pd.DataFrame:
+    """Одна строка на карту: итоговый риск, сработавшие правила и главная причина.
+
+    В список попадают только срабатывания с оценкой от min_risk: смягчённые остаются
+    в таблице срабатываний, но карту подозрительной не делают.
+    """
+    events = events[events["score"] >= min_risk]
     if events.empty:
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
 
@@ -278,7 +353,8 @@ def summarize(events: pd.DataFrame) -> pd.DataFrame:
 
 def detect(tx: pd.DataFrame, rules: Rules | None = None) -> pd.DataFrame:
     """Подозрительные карты, от самых рискованных. Пустая таблица, если ничего не найдено."""
-    return summarize(find_events(tx, rules))
+    rules = rules or Rules()
+    return summarize(find_events(tx, rules), rules.min_risk)
 
 
 def main():

@@ -22,8 +22,9 @@ import streamlit as st
 
 import generator
 import theme
-from detectors import FAST_CASHOUT, FUNNEL, RULE_NAMES, TRANSIT, Rules, find_events, summarize
+from detectors import FAST_CASHOUT, FUNNEL, MITIGATION, RULE_NAMES, TRANSIT, Rules, find_events, summarize
 from flow_graph import build_graph, to_html
+from honest import TITLES as SITUATION_TITLES
 from loader import ATM, EXTERNAL, load_ground_truth, load_transactions
 from metrics import evaluate
 from tracing import to_sankey, trace
@@ -32,7 +33,8 @@ REPO_URL = "https://github.com/PachkaKofe04/drop_finder"
 RULE_TITLES = {TRANSIT: "Транзит", FUNNEL: "Воронка", FAST_CASHOUT: "Быстрое обналичивание"}
 SCHEME_TITLES = {**RULE_TITLES, "split": "Разветвление", "warmup": "Прогрев", "p2p": "P2P-дроп"}
 DIFFICULTY_TITLES = {generator.EASY: "Простая", generator.HARD: "Сложная"}
-OP_TITLES = {"transfer": "перевод", "cash_withdrawal": "снятие", "top_up": "пополнение", "other": "другое"}
+OP_TITLES = {"transfer": "перевод", "cash_withdrawal": "снятие", "top_up": "пополнение", "payment": "оплата",
+             "other": "другое"}
 PARTY_TITLES = {EXTERNAL: "Пополнение", ATM: "Банкомат"}
 SYNTHETIC, UPLOAD = "Синтетика", "Свой файл"
 CSS = Path(__file__).parent / "assets" / "app.css"
@@ -58,7 +60,7 @@ def uploads_allowed() -> bool:
 
 @st.cache_data(show_spinner="Генерирую синтетические данные...")
 def synthetic_data(seed: int, clients: int, difficulty: str):
-    return generator.generate(seed, clients, difficulty)
+    return generator.generate_labeled(seed, clients, difficulty)
 
 
 @st.cache_data(show_spinner="Читаю файл...")
@@ -74,11 +76,15 @@ def read_truth(content: bytes):
 @st.cache_data(show_spinner="Ищу дропов...")
 def run_detection(tx: pd.DataFrame, rules: Rules):
     events = find_events(tx, rules)
-    return events, summarize(events)
+    return events, summarize(events, rules.min_risk)
 
 
 def data_sidebar():
-    """Источник данных. Возвращает (операции, разметка или None, предупреждения загрузчика)."""
+    """Источник данных.
+
+    Возвращает (операции, разметка дропов или None, разметка честных людей или None,
+    предупреждения загрузчика). Честные люди с разметкой есть только в сложной синтетике.
+    """
     st.sidebar.html(f'<div class="df-wordmark"><img src="{EMBLEM}" alt=""><div><b>DROP FINDER</b>'
                     '<small>антифрод-прототип</small></div></div>')
     st.sidebar.header("Данные")
@@ -94,9 +100,10 @@ def data_sidebar():
         difficulty = st.sidebar.radio(
             "Сложность синтетики", generator.DIFFICULTIES, format_func=DIFFICULTY_TITLES.get, horizontal=True,
             help="Простая: схемы укладываются в пороги правил. Сложная: добавлены схемы, которые эти пороги "
-                 "обходят (разветвление, прогрев, P2P-дроп), и ещё две ловушки. Подробнее - «Как это работает».")
-        transactions, truth = synthetic_data(seed, clients, difficulty)
-        return transactions, truth, []
+                 "обходят (разветвление, прогрев, P2P-дроп), и честные люди в ситуациях, похожих на дропов "
+                 "(ипотека, свадьба, продажа машины...). Подробнее - «Как это работает».")
+        transactions, truth, lookalikes = synthetic_data(seed, clients, difficulty)
+        return transactions, truth, lookalikes, []
 
     tx_file = st.sidebar.file_uploader("Операции, CSV", type=["csv", "txt"])
     truth_file = st.sidebar.file_uploader("Разметка дропов, CSV (необязательно)", type=["csv", "txt"])
@@ -110,7 +117,7 @@ def data_sidebar():
         st.error("Не удалось прочитать файл:")
         st.text(str(error))
         st.stop()
-    return transactions, truth, warnings
+    return transactions, truth, None, warnings
 
 
 def rules_sidebar() -> Rules:
@@ -133,6 +140,12 @@ def rules_sidebar() -> Rules:
         cashout_minutes = st.number_input("Снято за, минут", 5, 1440, 60, 5)
         cashout_share = st.slider("Снято не меньше, %", 50, 100, 80)
 
+        st.caption("Смягчающие обстоятельства")
+        mitigate = st.checkbox("Учитывать", value=defaults.mitigate,
+                               help="Знакомый отправитель (операции между картами были и раньше) или доход "
+                                    "от организации, которая платит многим (работодатель, Соцфонд), "
+                                    f"снижают оценку срабатывания на {MITIGATION}. Выключите, чтобы сравнить.")
+
     return Rules(
         transit_min_amount=transit_amount,
         transit_window=pd.Timedelta(hours=transit_hours),
@@ -144,6 +157,7 @@ def rules_sidebar() -> Rules:
         cashout_min_amount=cashout_amount,
         cashout_window=pd.Timedelta(minutes=cashout_minutes),
         cashout_min_share=cashout_share / 100,
+        mitigate=mitigate,
     )
 
 
@@ -194,6 +208,40 @@ def show_summary(tx: pd.DataFrame, suspicious: pd.DataFrame, result):
                           help="Какая доля отмеченных карт - действительно дропы")
         columns[4].metric("Recall", f"{result.recall:.1%}", border=True, help="Какую долю дропов нашли")
         columns[5].metric("F1", f"{result.f1:.1%}", border=True, help="Среднее гармоническое precision и recall")
+
+
+def show_mitigated(events: pd.DataFrame, suspicious: pd.DataFrame, min_risk: int):
+    """Карты, у которых правило сработало, но риск снижен смягчающими обстоятельствами."""
+    softened = events[(events["score"] < min_risk) & ~events["card"].isin(suspicious["card"])]
+    if softened.empty:
+        return
+    with st.expander(f"Риск снижен смягчающими обстоятельствами: {softened['card'].nunique()} карт"):
+        st.caption("Правило сработало, но обстоятельства говорят в пользу владельца. В список выше эти карты "
+                   "не попали; при сомнениях аналитик может проверить их вручную.")
+        st.dataframe(softened.assign(rule=softened["rule"].map(RULE_TITLES))[["card", "rule", "reason", "mitigation"]],
+                     hide_index=True, column_config={
+                         "card": st.column_config.TextColumn("Карта", width=165),
+                         "rule": st.column_config.TextColumn("Правило", width=165),
+                         "reason": st.column_config.TextColumn("Что заметило правило", width="large"),
+                         "mitigation": st.column_config.TextColumn("Что смягчает", width="large"),
+                     })
+
+
+def show_lookalikes(result):
+    """Честные люди из сложной синтетики: кого из них правила приняли за дропов."""
+    if result is None or result.by_situation.empty:
+        return
+    table = (result.by_situation.assign(title=result.by_situation["situation"].map(SITUATION_TITLES))
+                                .sort_values("flagged", ascending=False, kind="stable"))
+    st.subheader("Честные люди, похожие на дропов")
+    st.caption("Обычные люди в ситуациях, которые со стороны похожи на схемы дропов. "
+               "Всё, что попало в список подозрительных, - ложные тревоги.")
+    st.dataframe(table[["title", "people", "flagged"]], hide_index=True,
+                 row_height=ROW_HEIGHT, height=table_height(len(table)), column_config={
+                     "title": st.column_config.TextColumn("Ситуация", width="large"),
+                     "people": st.column_config.NumberColumn("Людей", width="small"),
+                     "flagged": st.column_config.NumberColumn("Приняты за дропов", width="medium"),
+                 })
 
 
 def show_table(suspicious: pd.DataFrame, drops: set, result):
@@ -254,11 +302,12 @@ def show_card(tx: pd.DataFrame, events: pd.DataFrame, suspicious: pd.DataFrame, 
     card_events = (events[events["card"] == card]
                    .sort_values(["score", "time"], ascending=[False, True])
                    .assign(rule=lambda e: e["rule"].map(RULE_TITLES)))
-    st.dataframe(card_events[["rule", "score", "time", "reason"]], hide_index=True, column_config={
+    st.dataframe(card_events[["rule", "score", "time", "reason", "mitigation"]], hide_index=True, column_config={
         "rule": st.column_config.TextColumn("Правило", width="small"),
         "score": st.column_config.NumberColumn("Оценка", width="small"),
         "time": st.column_config.DatetimeColumn("Когда", format="DD.MM.YYYY HH:mm", width="small"),
         "reason": st.column_config.TextColumn("Причина", width="large"),
+        "mitigation": st.column_config.TextColumn("Смягчает", width="medium"),
     })
 
     graph_column, ops_column = st.columns([3, 2])
@@ -358,8 +407,18 @@ def show_about():
 | Воронка | За 48 часов переводы от 8+ разных карт, собрано от 50 000 ₽, и за следующие сутки ушло 80%+ |
 | Быстрое обналичивание | Пришло от 30 000 ₽, и за час снято наличными 80%+ |
 
-Транзитные карты, передающие деньги друг другу, склеиваются в цепочки.
+«Ушло» - это перевод другому человеку или снятие наличных. Оплата ипотеки, клиники, магазина -
+трата своих денег, а не транзит. Транзитные карты, передающие деньги друг другу, склеиваются в цепочки.
 Пороги можно менять в боковой панели и сразу видеть, как меняются результат и точность.
+
+**Смягчающие обстоятельства** снижают оценку срабатывания, и карта не попадает в список:
+
+- отправитель знаком с картой - операции между ними были и раньше (так банки отличают перевод
+  знакомому от перевода незнакомцу; знакомство с похожей на транзитную картой не в счёт);
+- доход пришёл от организации, которая платит многим (работодатель, Соцфонд), - это зарплата или пенсия;
+- в воронке больше половины денег прислали знакомые.
+
+Такие срабатывания видны под списком: решение остаётся за аналитиком.
 
 В синтетических данных спрятаны три схемы, а среди обычных клиентов есть **ловушки**:
 складчина (много мелких переводов на одну карту) и снятие наличных сразу после зарплаты.
@@ -373,9 +432,11 @@ def show_about():
 | Прогрев | Недели обычной жизни перед схемой, потом крупная сумма снимается частями за сутки |
 | P2P-дроп | Покупатели платят по одному раз в 7-16 часов, за 48 часов меньше 8 отправителей |
 
-И ещё две ловушки: покупка со своей второй карты (похожа на транзит) и самозанятый
-(много оплат от разных людей, как у P2P-дропа). Правила под сложный режим не подстраивались:
-он показывает, где они ошибаются. Полнота по каждой схеме - под списком подозрительных карт.
+А ещё **честные люди в ситуациях, похожих на дропов**: ипотека с перевода супруга, вся зарплата
+или пенсия наличными, перевод вклада между своими банками, продажа машины, ремонт на деньги
+родителей, продажи на Авито, таксист с оплатой переводом, свадьба, сбор на лечение, совместная
+покупка, распродажа перед переездом, помощь друзей после потери работы. Под списком видно,
+кого из них правила всё равно принимают за дропов.
 
 Код, тесты и описание: [{REPO_URL}]({REPO_URL})
 """)
@@ -389,14 +450,14 @@ def main():
     st.title("Детектор дропов")
     st.caption("Прототип антифрод-инструмента: поиск дроп-карт по истории переводов")
 
-    transactions, truth, warnings = data_sidebar()
+    transactions, truth, lookalikes, warnings = data_sidebar()
     rules = rules_sidebar()
     if warnings:
         st.warning("При загрузке часть строк исправлена или отброшена:")
         st.text("\n".join(warnings))
 
     events, suspicious = run_detection(transactions, rules)
-    result = evaluate(suspicious, truth) if truth is not None else None
+    result = evaluate(suspicious, truth, lookalikes) if truth is not None else None
     drops = set(truth["card"]) if truth is not None else set()
 
     show_summary(transactions, suspicious, result)
@@ -404,6 +465,8 @@ def main():
         ["Подозрительные карты", "Разбор карты", "Граф связей", "Куда ушли деньги", "Как это работает"])
     with tab_list:
         show_table(suspicious, drops, result)
+        show_mitigated(events, suspicious, rules.min_risk)
+        show_lookalikes(result)
     with tab_card:
         show_card(transactions, events, suspicious, drops)
     with tab_network:

@@ -69,6 +69,19 @@ def test_hard_synthetic(app):
     assert {"Разветвление", "Прогрев", "P2P-дроп"} <= set(app.dataframe[1].value["scheme"])
 
 
+def test_honest_people_and_mitigation(app):
+    """Сложная синтетика: таблица честных людей; без смягчающих обстоятельств подозрительных больше."""
+    next(r for r in app.sidebar.radio if r.label == "Сложность синтетики").set_value("hard").run()
+    situations = next(df.value for df in app.dataframe if "title" in df.value.columns)
+    assert "Свадьба, подарки переводом" in set(situations["title"])
+    with_mitigation = int(metrics(app)["Подозрительных"])
+    assert any(e.label.startswith("Риск снижен смягчающими обстоятельствами") for e in app.expander)
+
+    next(c for c in app.checkbox if c.label == "Учитывать").uncheck().run()
+    assert not app.exception
+    assert int(metrics(app)["Подозрительных"]) > with_mitigation
+
+
 def test_money_tracing_tab(app):
     assert metrics(app)["Прослежено"] == "179 000 ₽"
     assert metrics(app)["Снято наличными"] == "171 400 ₽"

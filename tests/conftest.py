@@ -15,6 +15,12 @@ def synthetic():
 
 
 @pytest.fixture(scope="session")
-def synthetic_hard():
+def synthetic_hard_labeled():
+    """Сложный режим (seed 42) с разметкой честных людей: (transactions, ground_truth, lookalikes)."""
+    return generator.generate_labeled(42, 200, generator.HARD)
+
+
+@pytest.fixture(scope="session")
+def synthetic_hard(synthetic_hard_labeled):
     """То же для сложного режима (seed 42): (transactions, ground_truth)."""
-    return generator.generate(42, 200, generator.HARD)
+    return synthetic_hard_labeled[:2]

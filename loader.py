@@ -17,7 +17,7 @@
   sender_card    str         - карта отправителя (для пополнения - EXTERNAL)
   receiver_card  str         - карта получателя (для снятия наличных - ATM)
   amount         float       - сумма, всегда > 0
-  op_type        str         - transfer | cash_withdrawal | top_up | other
+  op_type        str         - transfer | cash_withdrawal | top_up | payment | other
 
 Проверить файл из командной строки:
     python loader.py путь/к/файлу.csv
@@ -37,7 +37,7 @@ import pandas as pd
 # --- Формат данных, общий для всего проекта ---------------------------------
 
 COLUMNS = ["datetime", "sender_card", "receiver_card", "amount", "op_type"]
-OP_TYPES = ["transfer", "cash_withdrawal", "top_up"]
+OP_TYPES = ["transfer", "cash_withdrawal", "top_up", "payment"]
 OTHER = "other"        # тип операции, который не удалось распознать
 ATM = "ATM"            # «получатель» при снятии наличных
 EXTERNAL = "EXTERNAL"  # «отправитель» при пополнении (зарплата, другой банк, наличные)
@@ -65,6 +65,9 @@ OP_TYPE_KEYWORDS = [
     ("top_up", ["top_up", "topup", "deposit", "пополн", "зачисл", "взнос"]),
     ("cash_withdrawal", ["cash_withdrawal", "withdraw", "atm", "сняти", "выдача", "банкомат"]),
     ("transfer", ["transfer", "p2p", "перевод"]),
+    # Оплата организации: покупка, услуги, кредит. Проверяется последней:
+    # «Перевод в счёт оплаты» - это всё-таки перевод человеку.
+    ("payment", ["payment", "purchase", "оплат", "покупк", "погашен", "платеж"]),
 ]
 
 # Полный номер карты: 13-19 цифр (после удаления пробелов и дефисов).

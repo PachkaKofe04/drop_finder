@@ -11,6 +11,7 @@ def test_short_card():
     assert theme.short_card("2202 **** **** 4821 #a1b2c3") == "•• 4821 #a1b2c3"
     assert theme.short_card("token-42") == "token-42"
     assert theme.short_card("customer-0000123456") == "•• 123456"
+    assert theme.short_card("Работодатель 3") == "Работодатель 3"
 
 
 def test_rgba():

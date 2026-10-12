@@ -41,6 +41,7 @@ On Linux / macOS activate the environment with `source .venv/bin/activate`.
 | File | Purpose |
 |---|---|
 | `generator.py` | Synthetic transactions with hidden mule schemes |
+| `honest.py` | Ordinary people in life situations that look like mule schemes (hard mode) |
 | `loader.py` | Loads and validates any CSV (synthetic or real) into the common format |
 | `detectors.py` | Three detection rules, one row per suspicious card with a reason |
 | `metrics.py` | Precision / recall against the ground truth, benchmark over many seeds |
@@ -78,7 +79,7 @@ Every other part of the project works with this format only, whatever the data s
 | `sender_card` | Sender card, `EXTERNAL` for top-ups |
 | `receiver_card` | Receiver card, `ATM` for cash withdrawals |
 | `amount` | Amount in rubles |
-| `op_type` | `transfer`, `cash_withdrawal`, `top_up` (`other` if not recognized in real data) |
+| `op_type` | `transfer`, `cash_withdrawal`, `top_up`, `payment` (to a shop, bank, clinic...; `other` if not recognized in real data) |
 
 Cards in synthetic data are masked: `2202 **** **** 4821`.
 
@@ -129,6 +130,28 @@ It also adds two more legitimate look-alikes:
 - a self-employed tutor: payments from many different people all month, like a P2P mule,
   but with round amounts and returning customers, and the money stays on the card.
 
+### Honest people who look like mules
+
+Hard mode also adds ordinary people, a fifth of the number of clients, in 14 life situations that look
+like mule schemes from the outside. Each of them has an ordinary life around the situation: a salary from
+an employer twice a month (Russian labour law requires at least that) or a pension from the Social Fund,
+purchases, transfers with friends. The parameters follow public data: an average pension of about
+25 000 rubles, an average salary of about 100 000, wedding gifts of 5-20 thousand from friends.
+
+| Situation | Looks like |
+|---|---|
+| Mortgage paid from a spouse's transfer | transit |
+| Whole salary or pension withdrawn in cash on payday | fast cash-out |
+| Savings moved between one's own banks for a better rate | transit |
+| Sold a car and paid for a new one the same day | transit |
+| Renovation paid with parents' money | transit |
+| Lost a job, friends help with the rent | transit |
+| Selling things on Avito, reselling phones, taxi fares paid by transfer | P2P mule |
+| Wedding gifts, fundraising for treatment | funnel |
+| Organizer of a group purchase, selling everything before moving abroad | funnel |
+
+`data/lookalikes.csv` says who is in which situation, so false alarms can be counted per situation.
+
 ## Real data
 
 `loader.py` accepts real bank exports in CSV:
@@ -137,7 +160,7 @@ It also adds two more legitimate look-alikes:
 - columns are matched by name, including Russian ones (`Дата операции`, `Сумма`, ...);
   other names can be mapped explicitly;
 - dates like `2026-08-01 14:30:00` or `01.08.2026 14:30`, amounts like `1 234,56 руб.`;
-- operation types are recognized by keywords (`Перевод`, `Снятие наличных`, `Пополнение`);
+- operation types are recognized by keywords (`Перевод`, `Снятие наличных`, `Пополнение`, `Оплата`);
 - rows that cannot be parsed are dropped with a warning.
 
 Check a file:
@@ -191,13 +214,33 @@ than the generator's parameters, so the detector is not tuned to its own synthet
 | `funnel` | 8+ different senders within 48 hours, 50 000+ collected, and 80%+ of it leaves within the next 24 hours |
 | `fast_cashout` | 30 000+ arrives and 80%+ of it is withdrawn in cash within an hour |
 
+Money "leaves the card" only when it is transferred to a person or withdrawn in cash. A payment
+to an organization (a mortgage, a shop, a clinic, a car dealer) is spending one's own money,
+not passing it on.
+
 Every flagged card comes with a human-readable reason (in Russian), for example:
 
 > Транзит: пришло 88 000 ₽ от 5536 \*\*\*\* \*\*\*\* 9197, за 1 ч 42 мин ушло 87 399 ₽ (99%) на 4276 \*\*\*\* \*\*\*\* 4734, цепочка из 2 транзитных карт
 
 The risk score orders the list, it is not a probability: transit 70 (90 in a chain of transit cards),
-fast cash-out 75, funnel 85, plus 5 for each additional rule. Without `--truth` the command works
-on real exports and just saves the list to `data/suspicious.csv`.
+fast cash-out 75, funnel 85, plus 5 for each additional rule. A card is listed from a risk of 50.
+Without `--truth` the command works on real exports and just saves the list to `data/suspicious.csv`.
+
+### Mitigating circumstances
+
+A rule hit is softened when the circumstances speak for the owner:
+
+- the sender already knew the card: there were operations between them earlier in the data.
+  Banks use the same idea; since 2026 the Bank of Russia treats a transfer to someone the client
+  has not paid for 6 months as a risk sign. Knowing a card that itself looks like transit does not count,
+  otherwise mules could simply "introduce" their cards to each other in advance;
+- the income came from an organization that pays many cards, such as an employer or the Social Fund:
+  it is a salary or a pension;
+- more than half of a funnel's money came from people who already knew the card.
+
+A softened hit loses 45 points and drops below the list threshold. It stays visible in the dashboard
+with its explanation, so the analyst still decides. The checkbox in the sidebar, or `--no-mitigation`
+in `metrics.py`, turns this off for comparison.
 
 ### Results on synthetic data
 
@@ -206,16 +249,17 @@ on real exports and just saves the list to `data/suspicious.csv`.
 | | Precision | Recall | F1 |
 |---|---|---|---|
 | Easy, seed 42 | 93.3% | 100% | 96.6% |
-| Easy, mean over 20 seeds | 94.6% | 100% | 97.1% |
+| Easy, mean over 20 seeds | 96.5% | 100% | 98.1% |
 | Easy, worst seed | 87.5% | 100% | 93.3% |
-| Hard, seed 42 | 75.0% | 53.6% | 62.5% |
-| Hard, mean over 20 seeds | 74.7% | 51.0% | 60.6% |
-| Hard, worst seed | 70.0% | 48.3% | 57.1% |
+| Hard, seed 42 | 57.7% | 53.6% | 55.6% |
+| Hard, mean over 20 seeds | 58.1% | 51.0% | 54.3% |
+| Hard, worst seed | 53.8% | 48.3% | 50.9% |
 
-In easy mode all 17 false positives over 20 seeds come from the transit rule: a regular client receives
-10-53 thousand rubles and happens to send about the same amount within a few hours. The legitimate look-alikes
-(group collections, cash after payday) produce none. False positives get the lowest risk score (70),
-while real transit chains get 90.
+In easy mode 11 false positives remain over 20 seeds, all from the transit rule: a regular client receives
+10-53 thousand rubles from someone they had not dealt with before and happens to send about the same amount
+within a few hours. The legitimate look-alikes (group collections, cash after payday) produce none.
+False positives get the lowest risk score (70), while real transit chains get 90.
+Hard mode is harder on both sides: mules that slip past the rules and honest people who look like mules.
 
 **Caveat:** the rules and the generator were written by the same author, so the easy numbers are optimistic.
 Hard mode shows how fast they drop once mules behave a little differently. Real data is noisier still,
@@ -243,14 +287,44 @@ Recall by scheme in hard mode, 20 seeds:
 - `p2p`: payments come too rarely for the funnel window. The 5 caught cards were caught by the transit
   rule by chance, when a cash withdrawal happened to match one payment.
 
-There are 97 false positives over 20 seeds. 80 of them are the own-second-card look-alike: the transit rule
-flags every one of them. The other 17 are the same regular clients as in easy mode. The self-employed
-look-alike produces none, because no rule looks at many senders over a long period. A P2P detector
-would have to, and this look-alike is there to keep it honest.
+The rules were deliberately not tuned to the hard mode mules. It is a baseline for the next detector to beat.
 
-The rules were deliberately not tuned to hard mode. It is a baseline for the next detector to beat.
+### Honest people: false alarms per situation
 
-Performance: about 6 seconds for 1 million operations. Operations are indexed by (card, time) keys
+Hard mode, 20 seeds. "Before" is the previous version of the rules, which counted any outgoing operation
+as passing money on and had no mitigating circumstances.
+
+| Situation | People | Flagged before | Flagged now | What made the difference |
+|---|---|---|---|---|
+| Sold a car, paid for a new one | 60 | 60 | 0 | paying the dealer is spending |
+| Mortgage from a spouse's transfer | 60 | 57 | 0 | paying the bank is spending |
+| Renovation with parents' money | 60 | 60 | 0 | the parents already knew the card |
+| Savings moved between own banks | 60 | 53 | 0 | both own accounts already knew the card |
+| Whole salary in cash | 60 | 60 | 2 | an employer that pays many (the 2 work for small employers) |
+| Pension in cash | 60 | 17 | 0 | a pension from the Social Fund |
+| Wedding gifts | 60 | 54 | 4 | the restaurant is a payment; the funnel now compares with all money received |
+| Fundraising for treatment | 60 | 32 | 3 | paying the clinic is spending |
+| Lost a job, friends help | 40 | 1 | 0 | the friends already knew the card |
+| Reselling phones | 60 | 12 | 10 | - |
+| Group purchase organizer | 60 | 58 | 58 | - |
+| Selling everything before moving | 40 | 36 | 36 | - |
+| One-off purchase from one's own second card | 80 | 80 | 80 | - |
+| Avito seller, taxi driver, self-employed tutor | 160 | 0 | 0 | the money stays on the card |
+
+False alarms fell from 602 to 207 and precision rose from 32.2% to 58.1%, while recall stayed at 51.0%:
+no mule was hidden by the mitigating circumstances.
+
+The cases that remain cannot be told apart in these five columns. A group purchase organizer collects money
+from strangers and passes it on to one person, which is exactly a funnel; a one-off move to one's own second
+card with no history is exactly transit. A bank would call the client, ask for documents, or look at what is
+not in this data: the device, complaints from victims, the Bank of Russia's database of fraudulent recipients.
+
+**Caveat:** the honest situations and the mitigating circumstances were also written by the same author,
+so they show the principle rather than final numbers. Mitigation is also something fraudsters can game:
+a mule card with earlier history with its victim would be softened. And 30 days of data is a short memory:
+banks look back months.
+
+Performance: about 3 seconds for 1 million operations. Operations are indexed by (card, time) keys
 and searched with binary search instead of row-by-row loops.
 
 ## Dashboard
@@ -264,6 +338,8 @@ streamlit run app.py
 - rule thresholds in the sidebar, the list and the metrics update immediately;
 - suspicious cards with risk, rules and reasons, CSV download;
 - with a ground truth: recall for each scheme and the list of missed mule cards;
+- mitigating circumstances: a checkbox to turn them off and a list of cards whose risk was lowered, with the reason;
+- in hard mode: how many honest people in each situation were taken for mules;
 - card drill-down: every rule hit, the card's operations and an interactive money flow graph
   that follows the chain through other suspicious cards;
 - network view of all suspicious cards and their direct links;
@@ -313,7 +389,8 @@ GitHub Actions runs the same on every push: lint, tests and coverage (the build 
 
 The tests check that every hidden scheme matches its definition in both modes, that easy mode stays
 exactly the same (the numbers above depend on it) and hard mode only adds to it, that the legitimate
-look-alikes match their descriptions, that the loader handles messy real exports
+look-alikes and every honest situation match their descriptions (amounts, timing, who knew whom before),
+that the mitigating circumstances lower false alarms without hiding mules, that the loader handles messy real exports
 (Windows-1251, `;`, Russian headers, mixed date formats, currency in amounts, full card numbers),
 that each detection rule fires on its pattern and stays silent on hand-made near misses,
 that money tracing never loses or double-counts money (splits, cycles, horizons, step limits),

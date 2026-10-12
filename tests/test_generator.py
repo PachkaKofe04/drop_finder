@@ -62,18 +62,30 @@ def test_columns_and_period(any_synthetic):
 
 
 def test_cards_are_masked(any_synthetic):
+    """Карты замаскированы. Организации (работодатель, Соцфонд, магазин) - названия, а не номера."""
     tx, _ = any_synthetic
-    cards = pd.concat([tx["sender_card"], tx["receiver_card"]])
+    cards = pd.concat([tx.loc[tx["op_type"] != "top_up", "sender_card"],
+                       tx.loc[tx["op_type"] != "payment", "receiver_card"]])
     assert cards[~cards.isin([ATM, EXTERNAL])].str.fullmatch(MASKED_CARD).all()
 
 
 def test_operation_types(any_synthetic):
     tx, _ = any_synthetic
-    assert set(tx["op_type"]) == {"transfer", "cash_withdrawal", "top_up"}
+    assert set(tx["op_type"]) >= {"transfer", "cash_withdrawal", "top_up"}
+    assert set(tx["op_type"]) <= {"transfer", "cash_withdrawal", "top_up", "payment"}
     # ATM - только получатель при снятии, EXTERNAL - только отправитель при пополнении
     assert ((tx["receiver_card"] == ATM) == (tx["op_type"] == "cash_withdrawal")).all()
-    assert ((tx["sender_card"] == EXTERNAL) == (tx["op_type"] == "top_up")).all()
+    assert (tx.loc[tx["sender_card"] == EXTERNAL, "op_type"] == "top_up").all()
+    # Пополняет карту не карта: EXTERNAL или организация, которая платит зарплату или пенсию
+    assert not tx.loc[tx["op_type"] == "top_up", "sender_card"].str.fullmatch(MASKED_CARD).any()
     assert (tx["amount"] > 0).all()
+
+
+def test_easy_mode_is_plain(synthetic):
+    """В простом режиме ни организаций, ни оплат: пополняет только EXTERNAL."""
+    tx, _ = synthetic
+    assert set(tx["op_type"]) == {"transfer", "cash_withdrawal", "top_up"}
+    assert ((tx["sender_card"] == EXTERNAL) == (tx["op_type"] == "top_up")).all()
 
 
 def test_regular_clients_count(synthetic):
@@ -222,9 +234,10 @@ def test_hard_ground_truth(synthetic_hard):
         "transit": generator.N_TRANSIT, "funnel": generator.N_FUNNEL, "fast_cashout": generator.N_FAST_CASHOUT,
         "split": generator.N_SPLIT, "warmup": generator.N_WARMUP, "p2p": generator.N_P2P,
     }
-    # Обычные карты: 200 клиентов и вторые карты из ловушки «покупка со своей второй карты»
-    cards = set(tx["sender_card"]) | set(tx["receiver_card"])
-    assert len(cards - set(gt["card"]) - {ATM, EXTERNAL}) == 200 + 200 // 50
+    # Все обычные клиенты простого режима на месте и дропами не стали
+    easy_tx, _ = generator.generate(42, 200)
+    easy_cards = set(easy_tx["sender_card"]) | set(easy_tx["receiver_card"])
+    assert easy_cards <= set(tx["sender_card"]) | set(tx["receiver_card"])
 
 
 @pytest.mark.parametrize("scheme_id", [f"split_{i}" for i in range(1, generator.N_SPLIT + 1)])
@@ -295,7 +308,9 @@ def test_own_card_payment_looks_like_transit():
     """Деньги приходят на вторую карту владельца и через 1-4 часа почти целиком уходят продавцу."""
     random.seed(0)
     cards = [f"card_{i}" for i in range(50)]
-    first, second = pd.DataFrame(generator.own_card_payments(cards, count=1)).itertuples()
+    ops, labels = generator.own_card_payments(cards, count=1)
+    first, second = pd.DataFrame(ops).itertuples()
+    assert labels == [{"card": first.receiver_card, "situation": "own_card"}]
 
     assert first.sender_card in cards and first.receiver_card not in cards
     assert second.sender_card == first.receiver_card
@@ -308,7 +323,9 @@ def test_self_employed_looks_like_p2p():
     """Много поступлений от разных людей, но суммы круглые и клиенты платят повторно."""
     random.seed(0)
     cards = [f"card_{i}" for i in range(50)]
-    ops = pd.DataFrame(generator.self_employed(cards, count=1))
+    ops, labels = generator.self_employed(cards, count=1)
+    ops = pd.DataFrame(ops)
+    assert labels == [{"card": ops["receiver_card"].iloc[0], "situation": "self_employed"}]
 
     assert ops["receiver_card"].nunique() == 1
     assert 20 <= len(ops) <= 35

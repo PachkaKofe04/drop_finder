@@ -11,6 +11,7 @@
 Результат:
     data/transactions.csv  - все операции за 30 дней
     data/ground_truth.csv  - дроп-карты и схема, в которой они участвуют
+    data/lookalikes.csv    - только в сложном режиме: честные люди, похожие на дропов, и их ситуация
 
 Формат колонок общий с реальными данными, см. loader.py.
 """
@@ -172,40 +173,44 @@ def group_collections(cards: list, count=2) -> list:
     return ops
 
 
-def own_card_payments(cards: list, count: int) -> list:
+def own_card_payments(cards: list, count: int) -> tuple[list, list]:
     """Ловушка для детектора: крупная покупка со своей второй карты.
 
     Клиент переводит крупную сумму с основной карты на свою вторую (с кэшбэком
     или большим лимитом), и через 1-4 часа 95-100% суммы уходит продавцу.
     Вторая карта выглядит как транзитная, хотя все деньги принадлежат одному человеку.
+    Возвращает (операции, разметка вторых карт).
     """
-    ops = []
+    ops, labels = [], []
     for owner in random.sample(cards, count):
         second = new_card()
+        labels.append({"card": second, "situation": "own_card"})
         seller = random.choice([c for c in cards if c != owner])
         when = random_daytime(random.randrange(DAYS - 1))
         amount = random.randint(20, 150) * 1000
         ops.append(tx(when, owner, second, amount, "transfer"))
         price = round_to(amount * random.uniform(0.95, 1.0), 100)
         ops.append(tx(after(when, 60, 240), second, seller, price, "transfer"))
-    return ops
+    return ops, labels
 
 
-def self_employed(cards: list, count: int) -> list:
+def self_employed(cards: list, count: int) -> tuple[list, list]:
     """Ловушка для детектора: самозанятый (репетитор, мастер маникюра).
 
     Весь месяц получает оплату от многих разных людей, как P2P-дроп, но суммы
     круглые, постоянные клиенты платят повторно, а деньги остаются на карте.
+    Возвращает (операции, разметка самозанятых).
     """
-    ops = []
+    ops, labels = [], []
     for worker in random.sample(cards, count):
+        labels.append({"card": worker, "situation": "self_employed"})
         customers = random.sample([c for c in cards if c != worker], random.randint(10, 20))
         price = random.choice([1500, 2000, 2500, 3000])
         for _ in range(random.randint(20, 35)):
             amount = price * random.choice([1, 1, 2])   # одно или два занятия
             when = random_daytime(random.randrange(DAYS))
             ops.append(tx(when, random.choice(customers), worker, amount, "transfer"))
-    return ops
+    return ops, labels
 
 
 def generate_clients(n: int) -> tuple[list, list]:
@@ -422,8 +427,13 @@ def p2p_scheme(scheme_id: str, clients: list) -> tuple[list, list]:
     return ops, [drop_record(drop, "p2p", scheme_id, "receiver")]
 
 
-def hard_extras(clients: list, victims: list) -> tuple[list, list]:
-    """Добавки сложного режима: схемы, обходящие пороги правил, и ещё две ловушки."""
+def hard_extras(clients: list, victims: list) -> tuple[list, list, list]:
+    """Добавки сложного режима: схемы, обходящие пороги правил, и честные люди, похожие на дропов.
+
+    Возвращает (операции, разметка дропов, разметка честных людей).
+    """
+    from honest import honest_people  # здесь, а не наверху: honest.py сам импортирует этот модуль
+
     ops, truth = [], []
     for i in range(1, N_SPLIT + 1):
         scheme_ops, scheme_truth = split_scheme(f"split_{i}", victims.pop())
@@ -440,15 +450,29 @@ def hard_extras(clients: list, victims: list) -> tuple[list, list]:
         ops += scheme_ops
         truth += scheme_truth
 
-    ops += own_card_payments(clients, max(1, len(clients) // 50))
-    ops += self_employed(clients, max(1, len(clients) // 100))
-    return ops, truth
+    labels = []
+    for trap in (own_card_payments(clients, max(1, len(clients) // 50)),
+                 self_employed(clients, max(1, len(clients) // 100)),
+                 honest_people(clients)):
+        ops += trap[0]
+        labels += trap[1]
+    return ops, truth, labels
 
 
 # --- Сборка ------------------------------------------------------------------
 
 def generate(seed: int, n_clients: int, difficulty: str = EASY) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Возвращает (transactions, ground_truth). Одинаковый seed - одинаковый результат.
+    """Возвращает (transactions, ground_truth). Одинаковый seed - одинаковый результат."""
+    transactions, truth, _ = generate_labeled(seed, n_clients, difficulty)
+    return transactions, truth
+
+
+def generate_labeled(seed: int, n_clients: int,
+                     difficulty: str = EASY) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Возвращает (transactions, ground_truth, lookalikes).
+
+    lookalikes - честные люди, похожие на дропов, и их ситуация (только в сложном режиме,
+    в простом таблица пустая). По ней видно, кого детектор принимает за дропа по ошибке.
 
     Сложный режим - это простой плюс добавки: они генерируются последними,
     поэтому все операции простого режима с тем же seed входят в сложный без изменений.
@@ -480,15 +504,16 @@ def generate(seed: int, n_clients: int, difficulty: str = EASY) -> tuple[pd.Data
         ops += scheme_ops
         truth += scheme_truth
 
+    lookalikes = []
     if difficulty == HARD:
-        extra_ops, extra_truth = hard_extras(clients, victims)
+        extra_ops, extra_truth, lookalikes = hard_extras(clients, victims)
         ops += extra_ops
         truth += extra_truth
 
     transactions = (pd.DataFrame(ops, columns=COLUMNS)
                     .sort_values("datetime", kind="stable")
                     .reset_index(drop=True))
-    return transactions, pd.DataFrame(truth)
+    return transactions, pd.DataFrame(truth), pd.DataFrame(lookalikes, columns=["card", "situation"])
 
 
 def main():
@@ -504,19 +529,26 @@ def main():
     if args.clients < 50:
         parser.error("--clients должно быть не меньше 50")
 
-    transactions, ground_truth = generate(args.seed, args.clients, args.difficulty)
+    transactions, ground_truth, lookalikes = generate_labeled(args.seed, args.clients, args.difficulty)
 
     DATA_DIR.mkdir(exist_ok=True)
     transactions.to_csv(DATA_DIR / "transactions.csv", index=False,
                         float_format="%.2f", date_format="%Y-%m-%d %H:%M:%S")
     ground_truth.to_csv(DATA_DIR / "ground_truth.csv", index=False)
+    if not lookalikes.empty:
+        lookalikes.to_csv(DATA_DIR / "lookalikes.csv", index=False)
 
     n_cards = pd.concat([transactions["sender_card"], transactions["receiver_card"]]).nunique() - 2
     print(f"Сохранено в {DATA_DIR}")
     print(f"  transactions.csv: {len(transactions)} операций, {n_cards} карт")
     print(f"  ground_truth.csv: {len(ground_truth)} дроп-карт")
     print(ground_truth["scheme"].value_counts().to_string())
+    if not lookalikes.empty:
+        print(f"  lookalikes.csv: {len(lookalikes)} честных людей, похожих на дропов")
 
 
 if __name__ == "__main__":
-    main()
+    # Через импорт, а не напрямую: honest.py импортирует generator, и список уже выданных
+    # номеров карт должен быть один, иначе у разных людей могут совпасть номера.
+    import generator
+    generator.main()
