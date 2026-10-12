@@ -44,9 +44,10 @@ On Linux / macOS activate the environment with `source .venv/bin/activate`.
 | `loader.py` | Loads and validates any CSV (synthetic or real) into the common format |
 | `detectors.py` | Three detection rules, one row per suspicious card with a reason |
 | `metrics.py` | Precision / recall against the ground truth, benchmark over many seeds |
-| `flow_graph.py` | Money flow graph: networkx for the structure, pyvis for the picture |
+| `flow_graph.py` | Money flow graph: networkx for the structure and layout, vis-network for the picture |
 | `tracing.py` | Money tracing: where the money from one operation went, Sankey diagram |
 | `app.py` | Streamlit dashboard |
+| `theme.py`, `assets/app.css`, `.streamlit/config.toml` | Dark theme: one palette for the dashboard, the graph and the Sankey diagram |
 | `tests/` | pytest suite |
 | `data/` | CSV files, not tracked by git |
 
@@ -60,7 +61,7 @@ flowchart LR
     D --> M["metrics.py<br>precision / recall"]
     GT["ground truth"] --> M
     D --> A["app.py<br>Streamlit dashboard"]
-    F["flow_graph.py<br>networkx + pyvis"] --> A
+    F["flow_graph.py<br>networkx + vis-network"] --> A
     TR["tracing.py<br>money tracing, Sankey"] --> A
 ```
 
@@ -267,6 +268,13 @@ streamlit run app.py
   that follows the chain through other suspicious cards;
 - network view of all suspicious cards and their direct links;
 - money tracing (see below).
+
+In the graphs money flows from left to right: where it came from, which cards it passed, where it was
+withdrawn. The layout is computed in Python, so the picture is the same every time it opens.
+Many ordinary cards linked to one card in the same way, such as the victims of a funnel,
+are folded into one node like "12 cards" with the full list in its tooltip.
+Colors carry meaning only: red is a flagged card, violet a mule the rules missed, gold a cash withdrawal,
+blue money coming from outside.
 
 ![Card drill-down: a transit chain from the victim through two mule cards to an ATM](docs/card.png)
 

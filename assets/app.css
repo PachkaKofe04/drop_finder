@@ -1,0 +1,91 @@
+/* Оформление поверх темы Streamlit (.streamlit/config.toml).
+   Цвета - переменные из theme.py, их объявляет app.py перед этим файлом.
+   Селекторы data-testid внутренние для Streamlit: после обновления версии проверять скриншотами. */
+
+/* Фон: холодное свечение сверху и лёгкое зерно, как у матовой поверхности */
+.stApp {
+  background: radial-gradient(ellipse 70% 40% at 50% -8%, rgba(56, 86, 112, 0.32), transparent 70%), var(--bg);
+  font-variant-numeric: tabular-nums;   /* цифры одной ширины: суммы и метрики не прыгают */
+}
+.stApp::before {
+  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.06;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Cpath fill='%23fff' filter='url(%23n)' opacity='.28' d='M0 0h160v160H0z'/%3E%3C/svg%3E");
+}
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stMainBlockContainer"] { padding-top: 3rem; }
+
+/* Заголовки */
+h1 { font-size: 2.1rem !important; font-weight: 600 !important; letter-spacing: -0.035em; padding-bottom: 0.2rem !important; }
+h3 { font-size: 1.1rem !important; font-weight: 600 !important; letter-spacing: -0.01em; }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p { color: var(--text-3); }
+
+/* Знак продукта в боковой панели */
+.df-wordmark { display: flex; align-items: center; gap: 11px; color: var(--text); }
+.df-wordmark img { width: 22px; height: 22px; flex-shrink: 0; }
+.df-wordmark b { font-size: 13px; font-weight: 650; letter-spacing: 0.16em; }
+.df-wordmark small { display: block; margin-top: 2px; font-size: 11px; color: var(--text-3); letter-spacing: 0; }
+
+/* Заголовки разделов боковой панели - мелким капсом, как подписи-«брови» */
+[data-testid="stSidebar"] h2 {
+  padding-top: 1.2rem; font-size: 10px !important; line-height: 16px !important; font-weight: 600 !important;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-3) !important;
+}
+/* Подпись метрики - приглушённая, обычным регистром, над крупным числом */
+[data-testid="stMetricLabel"] p { font-size: 12.5px !important; font-weight: 500 !important; color: var(--text-2) !important; }
+
+/* Боковая панель */
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #0e141a, #0b1015); }
+
+/* Метрики - карточки с верхней гранью */
+[data-testid="stMetric"] {
+  background: linear-gradient(155deg, #18222c, #11171e 70%);
+  border: 1px solid var(--hairline-strong) !important; border-radius: 18px !important;
+  padding: 13px 15px 11px !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+/* Свои поля и рамка уже у карточки, внутренний блок Streamlit (border=True) их не дублирует */
+[data-testid="stMetric"] > div { padding: 0 !important; border: none !important; }
+[data-testid="stMetricValue"] { letter-spacing: -0.03em; }
+[data-testid="stMetricDelta"] { opacity: 0.85; }
+
+/* Вкладки - сегментированный переключатель: тёмная лунка и приподнятый выбранный сегмент */
+[data-testid="stTabs"] [role="tablist"] {
+  gap: 4px; width: fit-content; max-width: 100%; height: auto; overflow-x: auto; padding: 4px;
+  margin-bottom: 0.7rem; border: 1px solid rgba(169, 202, 231, 0.06); border-radius: 15px;
+  background: rgba(5, 9, 13, 0.65); box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35) inset;
+}
+[data-testid="stTabs"] [role="tablist"]::after,
+[data-testid="stTabs"] .react-aria-SelectionIndicator { display: none; }
+[data-testid="stTab"] {
+  height: 36px; padding: 0 16px; border: 1px solid transparent; border-radius: 11px;
+  transition: background 130ms;
+}
+[data-testid="stTab"] p { font-size: 13px !important; font-weight: 550; color: var(--text-3) !important; }
+[data-testid="stTab"]:hover { background: rgba(169, 202, 231, 0.04); }
+[data-testid="stTab"]:hover p { color: var(--text-2) !important; }
+[data-testid="stTab"][aria-selected="true"] {
+  border-color: rgba(213, 231, 245, 0.11); background: linear-gradient(160deg, #2a3a47, #1a2630);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 3px 6px rgba(0, 0, 0, 0.3);
+}
+[data-testid="stTab"][aria-selected="true"] p { color: var(--text) !important; }
+
+/* Выбранные правила в фильтре - спокойные метки вместо ярких плашек */
+[data-testid="stMultiSelectTagsContainer"] [data-tag] {
+  background: rgba(143, 185, 223, 0.12) !important; border: 1px solid rgba(143, 185, 223, 0.28);
+  border-radius: 9px !important; color: var(--accent) !important;
+}
+[data-testid="stMultiSelectTagsContainer"] [data-tag] * { color: var(--accent) !important; }
+
+/* Кнопки, раскрывающиеся блоки, таблицы, графики */
+[data-testid="stDownloadButton"] button, [data-testid="stBaseButton-secondary"] {
+  background: linear-gradient(155deg, #18222b, #111921); border-color: var(--hairline-strong);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+[data-testid="stExpander"] details {
+  border-color: var(--hairline-strong); border-radius: 14px; background: rgba(18, 25, 32, 0.6);
+}
+[data-testid="stDataFrame"] > div { border-radius: 14px; }
+[data-testid="stPlotlyChart"] {
+  padding: 12px 8px 4px; border: 1px solid var(--hairline); border-radius: 18px;
+  background: linear-gradient(160deg, #111820, #0c1117 70%);
+}

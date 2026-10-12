@@ -11,22 +11,17 @@
 import heapq
 import itertools
 from dataclasses import dataclass
+from html import escape
 
 import pandas as pd
 import plotly.graph_objects as go
 
+import theme
 from loader import ATM, EXTERNAL
 
 CASHED, SETTLED = "Снято наличными", "Осталось на картах"
 DEFAULT_HORIZON = pd.Timedelta(hours=72)
 FLOW_COLUMNS = ["step", "time", "sender", "receiver", "amount", "op_type"]
-
-# Цвета узлов Sankey (те же, что на графе связей)
-COLOR_SOURCE = "#7fa7d4"
-COLOR_SUSPICIOUS = "#e0413c"
-COLOR_CARD = "#b8c4d6"
-COLOR_CASHED = "#2e9e5b"
-COLOR_SETTLED = "#a0a0a0"
 
 
 @dataclass
@@ -116,7 +111,11 @@ def trace(tx: pd.DataFrame, start, horizon: pd.Timedelta = DEFAULT_HORIZON,
 
 def to_sankey(result: Trace, suspicious=frozenset()) -> go.Figure:
     """Диаграмма потоков: ширина полосы - сумма. Все деньги заканчиваются
-    в одном из двух узлов: «Снято наличными» или «Осталось на картах»."""
+    в одном из двух узлов: «Снято наличными» или «Осталось на картах».
+
+    Цвета те же, что на графе связей. Полосы окрашены, только когда идут
+    к подозрительной карте или в наличные, остальные - нейтральные.
+    """
     source_name = result.start["sender_card"]
     if source_name == EXTERNAL:
         source_name = "Пополнение"
@@ -130,25 +129,41 @@ def to_sankey(result: Trace, suspicious=frozenset()) -> go.Figure:
 
     names = list(dict.fromkeys([*links["sender"], *links["receiver"]]))
     position = {name: i for i, name in enumerate(names)}
+    # Сколько денег прошло через узел: в источник ничего не приходит, для него - вся сумма
+    through = links.groupby("receiver")["amount"].sum().to_dict() | {source_name: result.amount}
 
     def color(name):
         if name == source_name:
-            return COLOR_SOURCE
-        return {CASHED: COLOR_CASHED, SETTLED: COLOR_SETTLED}.get(
-            name, COLOR_SUSPICIOUS if name in suspicious else COLOR_CARD)
+            return theme.INCOME
+        return {CASHED: theme.CASH, SETTLED: theme.SETTLED}.get(
+            name, theme.RISK if name in suspicious else theme.REGULAR)
 
-    def translucent(hex_color):
-        """Цвет полосы - цвет узла, куда идут деньги, полупрозрачный."""
-        red, green, blue = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
-        return f"rgba({red}, {green}, {blue}, 0.35)"
+    def link_color(target):
+        if target == CASHED:
+            return theme.rgba(theme.CASH, 0.22)
+        return theme.rgba(theme.RISK, 0.13) if target in suspicious else theme.rgba(theme.TEXT_2, 0.1)
+
+    def label(name):
+        """Короткое имя и сумма; номера карт из файла экранируются, plotly понимает часть HTML."""
+        short = name if name in (CASHED, SETTLED, "Пополнение") else theme.short_card(name)
+        return f"{escape(short)}<br><span style='color:{theme.TEXT_2}'>{through[name]:,.0f} ₽</span>".replace(",", " ")
 
     figure = go.Figure(go.Sankey(
         valueformat=",.0f",
         valuesuffix=" ₽",
-        textfont={"size": 14, "shadow": "none"},   # без белой обводки подписи читаются лучше
-        node={"label": names, "color": [color(n) for n in names], "pad": 24, "thickness": 18},
+        textfont={"family": theme.FONT, "size": 12, "color": theme.TEXT, "shadow": "none"},
+        node={"label": [label(n) for n in names], "color": [color(n) for n in names],
+              "customdata": [escape(n) for n in names], "hovertemplate": "%{customdata}<extra></extra>",
+              "pad": 34, "thickness": 10, "line": {"width": 0}},
         link={"source": links["sender"].map(position), "target": links["receiver"].map(position),
-              "value": links["amount"], "color": [translucent(color(n)) for n in links["receiver"]]},
+              "value": links["amount"], "color": [link_color(n) for n in links["receiver"]],
+              "hovertemplate": "%{value} <extra></extra>"},
     ))
-    figure.update_layout(height=max(320, 70 * len(names)), margin={"l": 10, "r": 10, "t": 10, "b": 10})
+    figure.update_layout(
+        height=max(340, 76 * len(names)), margin={"l": 8, "r": 8, "t": 16, "b": 30},
+        separators=", ", font={"family": theme.FONT, "color": theme.TEXT},
+        paper_bgcolor="rgba(0, 0, 0, 0)", plot_bgcolor="rgba(0, 0, 0, 0)",
+        hoverlabel={"bgcolor": theme.SURFACE_2, "bordercolor": theme.HAIRLINE_STRONG,
+                    "font": {"family": theme.FONT, "color": theme.TEXT, "size": 12}},
+    )
     return figure

@@ -106,12 +106,24 @@ def test_sankey_balances():
         (200, "drop2", ATM, 97_000, "cash_withdrawal"),
     )
     sankey = to_sankey(trace(tx, 0), suspicious={"drop1", "drop2"}).data[0]
-    labels = list(sankey.node.label)
-    assert {"victim", "drop1", "drop2", CASHED, SETTLED} == set(labels)
+    names = list(sankey.node.customdata)   # полные имена, подписи - короткие и с суммой
+    assert {"victim", "drop1", "drop2", CASHED, SETTLED} == set(names)
     # В конечные узлы приходит ровно столько, сколько ушло от жертвы
     into_sinks = sum(v for t, v in zip(sankey.link.target, sankey.link.value, strict=True)
-                     if labels[t] in (CASHED, SETTLED))
+                     if names[t] in (CASHED, SETTLED))
     assert into_sinks == pytest.approx(100_000)
+    # Через карту прошло столько, сколько на неё пришло, из источника - вся сумма; разряды через пробел
+    labels = dict(zip(names, sankey.node.label, strict=True))
+    assert labels["drop2"].endswith("98 500 ₽</span>")
+    assert labels["victim"].endswith("100 000 ₽</span>")
+
+
+def test_sankey_escapes_card_names():
+    """Plotly понимает часть HTML в подписях: номер карты из файла не должен стать разметкой."""
+    tx = ops((0, "<b>victim</b>", "drop", 100_000, "transfer"))
+    sankey = to_sankey(trace(tx, 0)).data[0]
+    assert "<b>" not in "".join(sankey.node.label) + "".join(sankey.node.customdata)
+    assert "&lt;b&gt;victim" in sankey.node.customdata[0]
 
 
 def test_synthetic_victims(synthetic):

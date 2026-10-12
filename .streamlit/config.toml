@@ -1,0 +1,36 @@
+# Тёмная тема дашборда. Цвета те же, что в theme.py (графики берут их оттуда).
+
+[theme]
+base = "dark"
+primaryColor = "#8fb9df"
+backgroundColor = "#0a0e13"
+secondaryBackgroundColor = "#121920"
+textColor = "#e8eef2"
+borderColor = "#232c36"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "12px"
+buttonRadius = "12px"
+linkColor = "#a9cae7"
+redColor = "#f07a86"
+greenColor = "#5fd3a8"
+blueColor = "#7fa9d1"
+violetColor = "#b49cf0"
+orangeColor = "#d9b26f"
+yellowColor = "#d9b26f"
+grayColor = "#76848f"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFontWeights = [600, 600, 600]
+baseFontSize = 14
+metricValueFontSize = "1.65rem"
+metricValueFontWeight = 550
+dataframeBorderColor = "#1d252e"
+dataframeHeaderBackgroundColor = "#121920"
+
+[theme.sidebar]
+backgroundColor = "#0d1218"
+secondaryBackgroundColor = "#141c24"
+
+[client]
+toolbarMode = "viewer"

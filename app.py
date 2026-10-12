@@ -12,15 +12,18 @@
 текст, не через markdown: иначе «2202 **** **** 4821» превратилось бы в жирный шрифт.
 """
 
+import base64
 import io
 import os
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 import generator
+import theme
 from detectors import FAST_CASHOUT, FUNNEL, RULE_NAMES, TRANSIT, Rules, find_events, summarize
-from flow_graph import COLOR_ATM, COLOR_EXTERNAL, COLOR_MISSED, COLOR_REGULAR, COLOR_SUSPICIOUS, build_graph, to_html
+from flow_graph import build_graph, to_html
 from loader import ATM, EXTERNAL, load_ground_truth, load_transactions
 from metrics import evaluate
 from tracing import to_sankey, trace
@@ -30,7 +33,17 @@ RULE_TITLES = {TRANSIT: "Транзит", FUNNEL: "Воронка", FAST_CASHOUT
 SCHEME_TITLES = {**RULE_TITLES, "split": "Разветвление", "warmup": "Прогрев", "p2p": "P2P-дроп"}
 DIFFICULTY_TITLES = {generator.EASY: "Простая", generator.HARD: "Сложная"}
 OP_TITLES = {"transfer": "перевод", "cash_withdrawal": "снятие", "top_up": "пополнение", "other": "другое"}
+PARTY_TITLES = {EXTERNAL: "Пополнение", ATM: "Банкомат"}
 SYNTHETIC, UPLOAD = "Синтетика", "Свой файл"
+CSS = Path(__file__).parent / "assets" / "app.css"
+ROW_HEIGHT = 35
+
+# Знак продукта: деньги расходятся из одной карты по двум. Картинкой, потому что
+# встроенный <svg> st.html вырезает.
+EMBLEM = "data:image/svg+xml;base64," + base64.b64encode(
+    f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{theme.ACCENT}" '
+    'stroke-width="1.8" stroke-linecap="round"><circle cx="5" cy="12" r="2.4"/><circle cx="19" cy="5.5" r="2.4"/>'
+    '<circle cx="19" cy="18.5" r="2.4"/><path d="M7.3 11 16.7 6.6M7.3 13l9.4 4.4"/></svg>'.encode()).decode()
 
 
 # --- Данные ------------------------------------------------------------------------
@@ -66,6 +79,8 @@ def run_detection(tx: pd.DataFrame, rules: Rules):
 
 def data_sidebar():
     """Источник данных. Возвращает (операции, разметка или None, предупреждения загрузчика)."""
+    st.sidebar.html(f'<div class="df-wordmark"><img src="{EMBLEM}" alt=""><div><b>DROP FINDER</b>'
+                    '<small>антифрод-прототип</small></div></div>')
     st.sidebar.header("Данные")
     allowed = uploads_allowed()
     source = st.sidebar.radio("Источник", [SYNTHETIC, UPLOAD] if allowed else [SYNTHETIC])
@@ -149,22 +164,36 @@ def duration(delta: pd.Timedelta) -> str:
     return f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
 
 
-def graph_theme() -> str:
-    """Тема для графа: светлая или тёмная, как у самой страницы."""
-    return "dark" if st.context.theme.get("type") == "dark" else "light"
+def table_height(rows: int) -> int:
+    """Высота таблицы по числу строк, чтобы она читалась без внутренней прокрутки (но не выше 700 px)."""
+    return min(ROW_HEIGHT * (rows + 1) + 3, 700)
+
+
+def with_money(table: pd.DataFrame):
+    """Таблица, где суммы показаны с разрядами: «178 000 ₽». Сортируется по-прежнему по числам."""
+    return table.style.format({"amount": money})
+
+
+def style_page():
+    """Оформление поверх темы Streamlit: фон, карточки, вкладки, подписи. Цвета - из theme.py."""
+    colors = {"bg": theme.BG, "surface": theme.SURFACE, "text": theme.TEXT, "text-2": theme.TEXT_2,
+              "text-3": theme.TEXT_3, "accent": theme.ACCENT, "hairline": theme.HAIRLINE,
+              "hairline-strong": theme.HAIRLINE_STRONG}
+    variables = " ".join(f"--{name}: {value};" for name, value in colors.items())
+    st.html(f"<style>:root {{ {variables} }}\n{CSS.read_text(encoding='utf-8')}</style>")
 
 
 def show_summary(tx: pd.DataFrame, suspicious: pd.DataFrame, result):
     n_cards = len((set(tx["sender_card"]) | set(tx["receiver_card"])) - {ATM, EXTERNAL})
     columns = st.columns(6 if result else 3)
-    columns[0].metric("Операций", f"{len(tx):,}".replace(",", " "))
-    columns[1].metric("Карт", f"{n_cards:,}".replace(",", " "))
-    columns[2].metric("Подозрительных", len(suspicious))
+    columns[0].metric("Операций", f"{len(tx):,}".replace(",", " "), border=True)
+    columns[1].metric("Карт", f"{n_cards:,}".replace(",", " "), border=True)
+    columns[2].metric("Подозрительных", len(suspicious), border=True)
     if result:
-        columns[3].metric("Precision", f"{result.precision:.1%}",
+        columns[3].metric("Precision", f"{result.precision:.1%}", border=True,
                           help="Какая доля отмеченных карт - действительно дропы")
-        columns[4].metric("Recall", f"{result.recall:.1%}", help="Какую долю дропов нашли")
-        columns[5].metric("F1", f"{result.f1:.1%}", help="Среднее гармоническое precision и recall")
+        columns[4].metric("Recall", f"{result.recall:.1%}", border=True, help="Какую долю дропов нашли")
+        columns[5].metric("F1", f"{result.f1:.1%}", border=True, help="Среднее гармоническое precision и recall")
 
 
 def show_table(suspicious: pd.DataFrame, drops: set, result):
@@ -180,14 +209,15 @@ def show_table(suspicious: pd.DataFrame, drops: set, result):
         table = table.assign(drop=table["card"].isin(drops))
 
     # Высота по числу строк, чтобы список читался без внутренней прокрутки
-    st.dataframe(table, hide_index=True, height=min(38 + 35 * len(table), 700), column_config={
-        "card": st.column_config.TextColumn("Карта", width="medium"),
-        "risk": st.column_config.ProgressColumn("Риск", min_value=0, max_value=100, format="%d", width="small"),
-        "rules": st.column_config.TextColumn("Правила", width="medium"),
-        "reason": st.column_config.TextColumn("Главная причина", width="large"),
-        "first_seen": st.column_config.DatetimeColumn("Впервые", format="DD.MM.YYYY HH:mm", width="small"),
-        "events": st.column_config.NumberColumn("Срабатываний", width="small"),
-        "drop": st.column_config.CheckboxColumn("Дроп по разметке", width="small"),
+    st.dataframe(table, hide_index=True, row_height=ROW_HEIGHT, height=table_height(len(table)), column_config={
+        "card": st.column_config.TextColumn("Карта", width=165),
+        "risk": st.column_config.ProgressColumn("Риск", min_value=0, max_value=100, format="%d", width=100,
+                                                color=theme.RISK),
+        "rules": st.column_config.TextColumn("Правила", width=165),
+        "reason": st.column_config.TextColumn("Главная причина", width=290),
+        "first_seen": st.column_config.DatetimeColumn("Впервые", format="DD.MM HH:mm", width=95),
+        "events": st.column_config.NumberColumn("Сработало", width=85, help="Сколько раз сработали правила"),
+        "drop": st.column_config.CheckboxColumn("Дроп", width=60, help="Дроп по разметке"),
     })
     st.download_button("Скачать список, CSV", suspicious.to_csv(index=False).encode("utf-8-sig"),
                        file_name="suspicious.csv", mime="text/csv")
@@ -205,20 +235,12 @@ def show_table(suspicious: pd.DataFrame, drops: set, result):
     if not result.missed.empty:
         st.subheader("Пропущенные дроп-карты")
         st.dataframe(result.missed.assign(scheme=scheme_titles(result.missed["scheme"])), hide_index=True,
-                     height=min(38 + 35 * len(result.missed), 700), column_config={
+                     row_height=ROW_HEIGHT, height=table_height(len(result.missed)), column_config={
                          "card": st.column_config.TextColumn("Карта", width="medium"),
                          "scheme": "Схема",
                          "scheme_id": "Экземпляр схемы",
                          "role": "Роль",
                      })
-
-
-def show_legend(with_truth: bool):
-    items = [(COLOR_SUSPICIOUS, "подозрительная"), (COLOR_REGULAR, "обычная карта"),
-             (COLOR_ATM, "банкомат"), (COLOR_EXTERNAL, "пополнение")]
-    if with_truth:
-        items.insert(1, (COLOR_MISSED, "пропущенный дроп"))
-    st.html(" &nbsp; ".join(f'<span style="color:{color}">&#9679;</span> {label}' for color, label in items))
 
 
 def show_card(tx: pd.DataFrame, events: pd.DataFrame, suspicious: pd.DataFrame, drops: set):
@@ -243,21 +265,22 @@ def show_card(tx: pd.DataFrame, events: pd.DataFrame, suspicious: pd.DataFrame, 
     with graph_column:
         st.caption("Движение денег вокруг карты: прямые связи и дальше по цепочке через подозрительные карты")
         graph = build_graph(tx, [card], risk, drops, depth=3)
-        st.iframe(to_html(graph, height=480, theme=graph_theme()), height=500)
-        show_legend(bool(drops))
+        st.iframe(to_html(graph, height=480, detailed=True), height=480)
     with ops_column:
         st.caption("Операции карты")
         ops = tx[(tx["sender_card"] == card) | (tx["receiver_card"] == card)]
         incoming = ops["receiver_card"] == card
+        counterparty = ops["sender_card"].where(incoming, ops["receiver_card"])
         ops = ops.assign(direction=incoming.map({True: "приход", False: "расход"}),
-                         counterparty=ops["sender_card"].where(incoming, ops["receiver_card"]))
-        st.dataframe(ops[["datetime", "direction", "amount", "counterparty", "op_type"]], hide_index=True,
-                     column_config={
+                         counterparty=counterparty.replace(PARTY_TITLES),
+                         op_type=ops["op_type"].map(OP_TITLES).fillna(ops["op_type"]))
+        st.dataframe(with_money(ops[["datetime", "direction", "amount", "counterparty", "op_type"]]),
+                     hide_index=True, column_config={
                          "datetime": st.column_config.DatetimeColumn("Когда", format="DD.MM HH:mm"),
-                         "direction": "Направление",
-                         "amount": st.column_config.NumberColumn("Сумма, ₽", format="%.0f"),
-                         "counterparty": "Контрагент",
-                         "op_type": "Тип",
+                         "direction": st.column_config.TextColumn("", width="small"),
+                         "amount": st.column_config.TextColumn("Сумма", width="small"),
+                         "counterparty": st.column_config.TextColumn("Контрагент", width="medium"),
+                         "op_type": st.column_config.TextColumn("Тип", width="small"),
                      })
 
 
@@ -272,8 +295,7 @@ def show_network(tx: pd.DataFrame, suspicious: pd.DataFrame, drops: set):
     risk = dict(zip(suspicious["card"], suspicious["risk"], strict=True))
     graph = build_graph(tx, suspicious["card"].head(top), risk, drops, depth=1, max_edges=400)
     st.caption("Подозрительные карты и их прямые связи. Узлы можно двигать, при наведении видны подробности.")
-    st.iframe(to_html(graph, height=620, theme=graph_theme()), height=640)
-    show_legend(bool(drops))
+    st.iframe(to_html(graph, height=620), height=620)
 
 
 def show_tracing(tx: pd.DataFrame, suspicious: pd.DataFrame):
@@ -312,15 +334,17 @@ def show_tracing(tx: pd.DataFrame, suspicious: pd.DataFrame):
     st.plotly_chart(to_sankey(result, set(risk)))
     st.caption("Допущение, как в расследованиях: первыми с карты уходят именно прослеживаемые деньги, "
                "но не больше, чем пришло. Ширина полосы - сумма.")
-    st.dataframe(result.flows.assign(op_type=result.flows["op_type"].map(OP_TITLES).fillna(result.flows["op_type"])),
-                 hide_index=True, column_config={
-                     "step": st.column_config.NumberColumn("Шаг", width="small"),
-                     "time": st.column_config.DatetimeColumn("Когда", format="DD.MM HH:mm", width="small"),
-                     "sender": "Откуда",
-                     "receiver": "Куда",
-                     "amount": st.column_config.NumberColumn("Сумма, ₽", format="%.0f"),
-                     "op_type": "Тип",
-                 })
+    flows = result.flows.assign(sender=result.flows["sender"].replace(PARTY_TITLES),
+                                receiver=result.flows["receiver"].replace(PARTY_TITLES),
+                                op_type=result.flows["op_type"].map(OP_TITLES).fillna(result.flows["op_type"]))
+    st.dataframe(with_money(flows), hide_index=True, column_config={
+        "step": st.column_config.NumberColumn("Шаг", width="small"),
+        "time": st.column_config.DatetimeColumn("Когда", format="DD.MM HH:mm", width="small"),
+        "sender": "Откуда",
+        "receiver": "Куда",
+        "amount": "Сумма",
+        "op_type": "Тип",
+    })
 
 
 def show_about():
@@ -361,6 +385,7 @@ def show_about():
 
 def main():
     st.set_page_config(page_title="Детектор дропов", layout="wide")
+    style_page()
     st.title("Детектор дропов")
     st.caption("Прототип антифрод-инструмента: поиск дроп-карт по истории переводов")
 
